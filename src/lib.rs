@@ -1,6 +1,7 @@
 //! Obsession's core: plan → expert agents → page checks → verifier → ranker, in rounds.
 //! The CLI and the desktop app both call `run` and render the events it emits.
 pub mod agent;
+pub mod connections;
 pub mod db;
 pub mod eval;
 pub mod llm;
@@ -41,6 +42,12 @@ fn pick<'a>(experts: &'a [Expert], names: &Value) -> Vec<&'a Expert> {
     if chosen.is_empty() { experts.iter().collect() } else { chosen }
 }
 
+pub fn load_registry(root: &Path) -> Result<Value, Box<dyn std::error::Error>> {
+    let path = root.join("mcp.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?)
+}
+
 /// Runs one purchase search end to end and returns the report the UI shows.
 /// `root` holds `experts/`, `skills/`, `mcp.json` and receives `obsession.db` and `runs/`.
 pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::error::Error>> {
@@ -48,12 +55,15 @@ pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::e
     let main_model = main_model();
     // A different model family on purpose: the verifier should not share the finders' blind spots.
     let verifier_model = model("OBSESSION_VERIFIER", "commandcode-plan/z-ai/glm-5.3-flash");
-    let experts = agent::load_experts(&root.join("experts").to_string_lossy())?;
+    let registry = load_registry(root)?;
     let skills = agent::load_skills(&root.join("skills").to_string_lossy())?;
-    let registry_path = root.join("mcp.json");
-    let registry: Value = serde_json::from_str(
-        &std::fs::read_to_string(&registry_path).map_err(|e| format!("{}: {e}", registry_path.display()))?,
-    )?;
+    // An expert whose platform has no session would only burn steps on LOGIN_REQUIRED.
+    let (experts, offline): (Vec<Expert>, Vec<Expert>) = agent::load_experts(&root.join("experts").to_string_lossy())?
+        .into_iter()
+        .partition(|e| e.mcp.iter().all(|m| connections::usable(&registry, m)));
+    for e in &offline {
+        emit(json!({"kind": "warning", "text": format!("{} no participa: falta iniciar sesión en Conexiones", e.name)}));
+    }
     // The orchestrator only ever sees names and descriptions, never an expert's tools.
     let menu: Vec<Value> = experts.iter().map(|e| json!({"name": e.name, "description": e.description})).collect();
 

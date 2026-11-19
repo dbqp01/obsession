@@ -87,6 +87,15 @@ dd ul { margin: 0; padding-left: 18px; }
 .rejected li { margin: 3px 0; }
 .log { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
 
+.conn-head { display: flex; justify-content: space-between; align-items: center; }
+.conns { display: flex; flex-wrap: wrap; gap: 10px; }
+.conn { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; align-items: center; gap: 12px; min-width: 260px; }
+.conn .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); flex: none; }
+.conn.on .dot { background: var(--ok); }
+.conn .info { flex: 1; display: flex; flex-direction: column; }
+.conn .info small { color: var(--muted); font-size: 12px; }
+.conn-help { font-size: 13px; margin: 10px 0 0; padding: 8px 10px; background: #fdf3e7; border-radius: 6px; }
+
 @media (max-width: 900px) {
   .grid { grid-template-columns: 1fr; }
   .steps { grid-template-columns: 1fr 1fr; }

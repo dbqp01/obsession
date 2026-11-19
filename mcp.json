@@ -1,8 +1,49 @@
 {
   "servers": {
-    "amazon":     {"command": "self", "args": ["mcp", "amazon"]},
-    "aliexpress": {"command": "self", "args": ["mcp", "aliexpress"]},
-    "falabella":  {"command": "self", "args": ["mcp", "falabella"]},
-    "plazavea":   {"command": "self", "args": ["mcp", "plazavea"]}
+    "amazon": {
+      "command": "self",
+      "args": [
+        "mcp",
+        "amazon"
+      ]
+    },
+    "aliexpress": {
+      "command": "self",
+      "args": [
+        "mcp",
+        "aliexpress"
+      ]
+    },
+    "falabella": {
+      "command": "self",
+      "args": [
+        "mcp",
+        "falabella"
+      ]
+    },
+    "plazavea": {
+      "command": "self",
+      "args": [
+        "mcp",
+        "plazavea"
+      ]
+    },
+    "temu": {
+      "command": "node",
+      "args": [
+        "C:/Users/akimi/Documents/ChatGPT/pluggin web2api/src/connectors/temu/entry.mjs"
+      ],
+      "login": {
+        "label": "Temu",
+        "site": "https://www.temu.com",
+        "profile": "temu-chrome",
+        "command": "node",
+        "args": [
+          "C:/Users/akimi/Documents/ChatGPT/pluggin web2api/src/cli.mjs",
+          "temu",
+          "login"
+        ]
+      }
+    }
   }
 }

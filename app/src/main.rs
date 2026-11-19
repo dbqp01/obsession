@@ -35,6 +35,26 @@ fn search(app: AppHandle, query: String) -> Result<(), String> {
     Ok(())
 }
 
+fn registry() -> Result<serde_json::Value, String> {
+    obsession::load_registry(&root()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn connections() -> Result<Vec<serde_json::Value>, String> {
+    Ok(obsession::connections::list(&registry()?))
+}
+
+/// Opens the platform's own login in a new console; the person signs in there, never here.
+#[tauri::command]
+fn connect(id: String) -> Result<(), String> {
+    obsession::connections::start_login(&registry()?, &id)
+}
+
+#[tauri::command]
+fn disconnect(id: String) -> Result<(), String> {
+    obsession::connections::disconnect(&registry()?, &id)
+}
+
 fn main() {
     // mcp.json starts store servers as "self": answer them before opening any window.
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -48,7 +68,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Busy(AtomicBool::new(false)))
-        .invoke_handler(tauri::generate_handler![search])
+        .invoke_handler(tauri::generate_handler![search, connections, connect, disconnect])
         .run(tauri::generate_context!())
         .expect("no se pudo abrir la ventana de Obsession");
 }

@@ -20,6 +20,14 @@ La app usa el mismo núcleo (`src/lib.rs`) que la CLI y muestra la búsqueda pas
 
 Para revisar la interfaz en un navegador sin la app, graba una corrida con `OBSESSION_RECORD=ui/demo-events.jsonl obsession "…"` y abre `ui/index.html` desde un servidor estático: al pulsar Buscar, la reproduce.
 
+## Conexiones (tiendas con tu sesión)
+
+Algunas tiendas muestran precios solo con tu cuenta. Un MCP en `mcp.json` que tiene un bloque `login` aparece en el panel **Conexiones** de la app y en `obsession connections`. Al conectar se abre el login del propio conector (hoy el de AnyWeb para Temu): una ventana normal del navegador con la página oficial de la tienda, donde inicias sesión tú. Obsession no ve contraseñas ni cookies; solo comprueba que el perfil del navegador exista. "Desconectar" (`obsession logout temu`) borra ese perfil.
+
+Los expertos de una tienda sin sesión no participan en la búsqueda, y la app avisa por qué.
+
+Límite: Chrome permite un solo proceso por perfil. Si otro programa ya tiene abierto el MCP de Temu (por ejemplo, un cliente MCP con `anyweb-temu` registrado), el experto de Temu falla con `INTERNAL_ERROR` hasta que ese programa lo cierre.
+
 ## Eval
 
 `obsession eval` corre las consultas de `eval/cases.json`. A cada pick lo vuelve a abrir en su página y lo marca como falso si no abre, si el precio se movió más de 5 % o si es un accesorio. También pide la respuesta a un modelo sin tools, para comparar. El resultado queda en `eval/results/<fecha>.md`, una tabla lado a lado donde tú marcas, caso por caso, si Obsession eligió mejor, igual o peor.

@@ -1,4 +1,4 @@
-use obsession::{agent, eval, mcp};
+use obsession::{agent, connections, eval, mcp};
 use serde_json::Value;
 use std::path::Path;
 
@@ -17,12 +17,24 @@ fn main() {
                 println!("{:<22} {}", s.name, s.description);
             }
         }),
+        Some("connections") => obsession::load_registry(root).map(|reg| {
+            for c in connections::list(&reg) {
+                let state = if c["connected"] == true { "conectado" } else { "sin sesión" };
+                println!("{:<12} {:<12} {}", s(&c["id"]), state, s(&c["site"]));
+            }
+        }),
+        Some("login") => obsession::load_registry(root)
+            .and_then(|reg| connections::start_login(&reg, arg1(&args)).map_err(Into::into))
+            .map(|_| println!("Se abrió el login: inicia sesión en el navegador y sigue las instrucciones de esa consola.")),
+        Some("logout") => obsession::load_registry(root)
+            .and_then(|reg| connections::disconnect(&reg, arg1(&args)).map_err(Into::into))
+            .map(|_| println!("Sesión borrada.")),
         Some("eval") => eval::run(root, args.get(1).map(String::as_str), &print_event)
             .map(|out| println!("\n{}", serde_json::to_string_pretty(&out["summary"]).unwrap())),
         Some(_) => obsession::run(root, &args.join(" "), &print_event).map(|_| ()),
         None => {
             eprintln!(
-                "uso:\n  obsession \"audífonos over-ear hasta 350 soles, Cusco\"\n  obsession eval [caso]\n  obsession experts | skills\n  obsession mcp <tienda>"
+                "uso:\n  obsession \"audífonos over-ear hasta 350 soles, Cusco\"\n  obsession eval [caso]\n  obsession experts | skills | connections\n  obsession login <plataforma> | logout <plataforma>\n  obsession mcp <tienda>"
             );
             std::process::exit(2);
         }
@@ -31,6 +43,10 @@ fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn arg1(args: &[String]) -> &str {
+    args.get(1).map(String::as_str).unwrap_or("")
 }
 
 fn s(v: &Value) -> &str {

@@ -56,7 +56,7 @@ fn fetch(client: &reqwest::blocking::Client, store: &str, url: &str) -> Result<S
     if !status.is_success() {
         return Err(format!("{store}: HTTP {status}"));
     }
-    if body.contains("account-verification") || (store == "amazon" && body.contains("captcha")) {
+    if is_challenge(store, &body) {
         return Err(format!("{store}: bloqueado (verificación anti-bot), no se evade"));
     }
     Ok(body)
@@ -139,10 +139,10 @@ fn page_amazon(url: &str, html: &str) -> PageCheck {
         url: url.into(),
         ok: true,
         title: Some(title),
-        price_pen: PRICE.captures(html).map(|c| price(&c[1])).filter(|p| *p > 0.0),
+        price_pen: PRICE.captures(html).map(|c| parse_price(&c[1])).filter(|p| *p > 0.0),
         in_stock: availability.as_deref().map(|a| a.contains("disponible") && !a.contains("no disponible")),
         seller,
-        rating: RATING.captures(html).map(|c| price(&c[1])),
+        rating: RATING.captures(html).map(|c| parse_price(&c[1])),
         reviews: REVIEWS.captures(html).and_then(|c| c[1].replace([',', '.'], "").parse().ok()),
         method: "page".into(),
         note: availability.unwrap_or_else(|| "sin dato de disponibilidad".into()),
@@ -168,7 +168,7 @@ fn page_falabella(url: &str, html: &str) -> PageCheck {
     // Falabella lists the internet price and the normal price; the buyer pays the lowest.
     let best = offers
         .iter()
-        .filter_map(|o| o["price"].as_str().map(price).or(o["price"].as_f64()))
+        .filter_map(|o| o["price"].as_str().map(parse_price).or(o["price"].as_f64()))
         .fold(None::<f64>, |m, p| Some(m.map_or(p, |m| m.min(p))));
     PageCheck {
         url: url.into(),
@@ -232,6 +232,12 @@ fn recheck_aliexpress(client: &reqwest::blocking::Client, url: &str, title: &str
     }
 }
 
+/// Bot challenges (Akamai bm-verify, captcha pages) are reported as blocks, never solved.
+fn is_challenge(store: &str, body: &str) -> bool {
+    ["account-verification", "triggerInterstitialChallenge", "bm-verify="].iter().any(|m| body.contains(m))
+        || (store == "amazon" && body.contains("captcha"))
+}
+
 fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -243,7 +249,7 @@ fn encode(s: &str) -> String {
 }
 
 /// "PEN 1,234.56" / "S/ 1,299" / "205,97" → 1234.56 / 1299 / 205.97
-fn price(s: &str) -> f64 {
+pub fn parse_price(s: &str) -> f64 {
     let digits: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == ',').collect();
     // A trailing ",dd" is a decimal comma; any other comma groups thousands.
     let normalized = match digits.rfind(',') {
@@ -264,10 +270,10 @@ fn parse_amazon(html: &str) -> Vec<Listing> {
             Some(Listing {
                 store: "amazon".into(),
                 title: unescape(&TITLE.captures(card)?[1]),
-                price_pen: price(&PRICE.captures(card)?[1]),
+                price_pen: parse_price(&PRICE.captures(card)?[1]),
                 url: format!("https://www.amazon.com{}", &HREF.captures(card)?[1]),
                 seller: None,
-                rating: RATING.captures(card).map(|c| price(&c[1])),
+                rating: RATING.captures(card).map(|c| parse_price(&c[1])),
                 sold: None,
             })
         })
@@ -310,7 +316,7 @@ fn parse_falabella(html: &str) -> Vec<Listing> {
             Some(Listing {
                 store: "falabella".into(),
                 title: format!("{} {}", x["brand"].as_str().unwrap_or(""), x["displayName"].as_str()?),
-                price_pen: price(x["prices"][0]["price"][0].as_str()?),
+                price_pen: parse_price(x["prices"][0]["price"][0].as_str()?),
                 url: x["url"].as_str()?.to_string(),
                 seller: x["sellerName"].as_str().map(String::from),
                 rating: None,
@@ -353,10 +359,10 @@ mod tests {
 
     #[test]
     fn parses_price_formats() {
-        assert_eq!(price("PEN 1,234.56"), 1234.56);
-        assert_eq!(price("S/ 1,299"), 1299.0);
-        assert_eq!(price("PEN 205,97"), 205.97);
-        assert_eq!(price("310"), 310.0);
+        assert_eq!(parse_price("PEN 1,234.56"), 1234.56);
+        assert_eq!(parse_price("S/ 1,299"), 1299.0);
+        assert_eq!(parse_price("PEN 205,97"), 205.97);
+        assert_eq!(parse_price("310"), 310.0);
     }
 
     #[test]
@@ -391,6 +397,13 @@ mod tests {
         let c = page_plazavea("u", pv);
         assert_eq!((c.price_pen, c.in_stock), (Some(399.0), Some(false)));
         assert!(!page_plazavea("u", "[]").ok);
+    }
+
+    #[test]
+    fn challenge_pages_are_blocks() {
+        assert!(is_challenge("amazon", "<script>function triggerInterstitialChallenge() {}</script>"));
+        assert!(is_challenge("falabella", "https://x/account-verification?go"));
+        assert!(!is_challenge("falabella", "<h2 aria-label=\"FiiO JT3\">"));
     }
 
     #[test]

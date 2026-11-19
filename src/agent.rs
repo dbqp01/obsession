@@ -250,16 +250,23 @@ pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill
                 _ => match name.split_once("__").and_then(|(srv, tool)| clients.get_mut(srv).map(|c| (c, tool))) {
                     None => format!("tool desconocida: {name}"),
                     Some((client, tool)) => match client.call(tool, args.clone()) {
-                        Err(e) => format!("error: {e}"),
-                        Ok(text) => match serde_json::from_str::<Vec<Listing>>(&text) {
-                            Ok(listings) => {
+                        Err(e) => {
+                            // Surface it: otherwise a failing source just looks like "0 picks".
+                            note(format!("{tool} falló: {e}"));
+                            format!("error: {e}")
+                        }
+                        Ok(text) => match serde_json::from_str::<Vec<Listing>>(&text)
+                            .ok()
+                            .or_else(|| text_listings(&text, name.split_once("__").map_or(name, |(srv, _)| srv)))
+                        {
+                            Some(listings) => {
                                 let ids = store.add(listings);
                                 emit(json!({"kind": "search", "expert": expert.name, "query": args["query"], "results": ids.len()}));
                                 seen.extend(&ids);
                                 store.table(&ids)
                             }
-                            // shortcut: non-listing MCP output is truncated, not summarized; summarize when such MCPs join.
-                            Err(_) => text.chars().take(RAW_TEXT_CHARS).collect(),
+                            // shortcut: other non-listing MCP output is truncated, not summarized; summarize when such MCPs join.
+                            None => text.chars().take(RAW_TEXT_CHARS).collect(),
                         },
                     },
                 },
@@ -270,9 +277,45 @@ pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill
     failed("se agotaron los pasos sin submit".into())
 }
 
+/// Reads AnyWeb's text format: numbered "N. title" blocks with "Precio:" and "Enlace:" lines.
+fn text_listings(text: &str, store: &str) -> Option<Vec<Listing>> {
+    let mut out = Vec::new();
+    let mut cur: Option<(String, Option<f64>, Option<String>)> = None;
+    let flush = |c: Option<(String, Option<f64>, Option<String>)>, out: &mut Vec<Listing>| {
+        if let Some((title, Some(price), Some(url))) = c {
+            out.push(Listing { store: store.into(), title, price_pen: price, url, seller: None, rating: None, sold: None });
+        }
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some((_, title)) = t.split_once(". ").filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
+            flush(cur.take(), &mut out);
+            cur = Some((title.to_string(), None, None));
+        } else if let Some(c) = cur.as_mut() {
+            if let Some(p) = t.strip_prefix("Precio:") {
+                c.1 = Some(crate::stores::parse_price(p)).filter(|p| *p > 0.0);
+            } else if let Some(u) = t.strip_prefix("Enlace:") {
+                c.2 = Some(u.trim().to_string());
+            }
+        }
+    }
+    flush(cur, &mut out);
+    (!out.is_empty()).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_anyweb_text_listings() {
+        let text = "1. CCA CRA IEM\n   Precio: S/ 24.49\n   Imagen: x\n   Enlace: https://www.temu.com/pe/a.html\n\n\
+                    2. Sin precio\n   Precio: No mostrado\n   Enlace: https://www.temu.com/pe/b.html";
+        let l = text_listings(text, "temu").unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!((l[0].title.as_str(), l[0].price_pen, l[0].store.as_str()), ("CCA CRA IEM", 24.49, "temu"));
+        assert!(text_listings("No encontré productos.", "temu").is_none());
+    }
 
     #[test]
     fn parses_frontmatter() {

@@ -196,6 +196,44 @@ async function replay() {
   }
 }
 
+// Connections: outside the app there is no backend, so a fixed list stands in.
+const DEMO_CONNS = [{ id: "temu", label: "Temu", site: "https://www.temu.com", connected: true }];
+
+async function loadConnections() {
+  const conns = tauri ? await tauri.core.invoke("connections").catch((e) => { warn(String(e)); return []; }) : DEMO_CONNS;
+  const box = $("conns");
+  if (!conns.length) {
+    box.replaceChildren(el("p", { class: "muted", text: "Ninguna tienda de mcp.json pide sesión." }));
+    return;
+  }
+  box.replaceChildren(...conns.map((c) => el("div", { class: `conn${c.connected ? " on" : ""}` },
+    el("span", { class: "dot", title: c.connected ? "Conectado" : "Sin sesión" }),
+    el("div", { class: "info" },
+      el("b", { text: c.label }),
+      el("small", { text: c.connected ? "Conectado: participa en las búsquedas" : "Sin sesión: no participa" })),
+    c.connected
+      ? el("button", { class: "link", text: "Desconectar", onclick: () => disconnect(c) })
+      : el("button", { class: "primary", text: "Conectar", onclick: () => connect(c) }))));
+}
+
+async function connect(c) {
+  if (!tauri) return;
+  try {
+    await tauri.core.invoke("connect", { id: c.id });
+    $("conns").append(el("p", { class: "conn-help",
+      text: `Se abrió ${c.label} en el navegador y una consola con instrucciones. Inicia sesión en la página de ${c.label}, cierra esa ventana, pulsa Enter en la consola y luego "Actualizar".` }));
+  } catch (e) { warn(String(e)); }
+}
+
+async function disconnect(c) {
+  if (!tauri || !confirm(`¿Borrar la sesión de ${c.label} en este equipo?`)) return;
+  try { await tauri.core.invoke("disconnect", { id: c.id }); } catch (e) { warn(String(e)); }
+  loadConnections();
+}
+
+$("conn-refresh").addEventListener("click", loadConnections);
+loadConnections();
+
 if (tauri) tauri.event.listen("obsession", (msg) => onEvent(msg.payload));
 $("go").addEventListener("click", start);
 $("query").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) start(); });
