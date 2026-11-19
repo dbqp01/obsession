@@ -1,13 +1,13 @@
 //! Store experts: one GET per keyword, curated into `Listing`s. Read-only; a blocked store
 //! reports the block instead of retrying or evading it.
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::LazyLock;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Listing {
-    pub store: &'static str,
+    pub store: String,
     pub title: String,
     pub price_pen: f64,
     pub url: String,
@@ -87,7 +87,7 @@ fn parse_amazon(html: &str) -> Vec<Listing> {
         .skip(1)
         .filter_map(|card| {
             Some(Listing {
-                store: "amazon",
+                store: "amazon".into(),
                 title: unescape(&TITLE.captures(card)?[1]),
                 price_pen: price(&PRICE.captures(card)?[1]),
                 url: format!("https://www.amazon.com{}", &HREF.captures(card)?[1]),
@@ -110,7 +110,7 @@ fn parse_aliexpress(html: &str) -> Vec<Listing> {
             let prices = &x["prices"];
             let p = prices["salePrice"]["minPrice"].as_f64().or(prices["originalPrice"]["minPrice"].as_f64())?;
             Some(Listing {
-                store: "aliexpress",
+                store: "aliexpress".into(),
                 title: x["title"]["displayTitle"].as_str()?.to_string(),
                 price_pen: p,
                 url: format!("https://www.aliexpress.com/item/{}.html", x["productId"].as_str()?),
@@ -133,7 +133,7 @@ fn parse_falabella(html: &str) -> Vec<Listing> {
         .iter()
         .filter_map(|x| {
             Some(Listing {
-                store: "falabella",
+                store: "falabella".into(),
                 title: format!("{} {}", x["brand"].as_str().unwrap_or(""), x["displayName"].as_str()?),
                 price_pen: price(x["prices"][0]["price"][0].as_str()?),
                 url: x["url"].as_str()?.to_string(),
@@ -156,7 +156,7 @@ fn parse_plazavea(json: &str) -> Vec<Listing> {
                 return None;
             }
             Some(Listing {
-                store: "plazavea",
+                store: "plazavea".into(),
                 title: x["productName"].as_str()?.to_string(),
                 price_pen: offer["Price"].as_f64()?,
                 url: x["link"].as_str()?.to_string(),
