@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Permisos de la ventana de Obsession",
+  "windows": ["main"],
+  "permissions": ["core:default", "opener:allow-open-url"]
+}

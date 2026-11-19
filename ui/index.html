@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Obsession</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Obsession</h1>
+    <p class="tagline">Busca la mejor compra, no solo el precio más bajo. Varios expertos buscan por ti, cada opción se vuelve a abrir en su página y otro modelo la revisa antes de recomendártela.</p>
+  </header>
+
+  <main>
+    <section class="ask card">
+      <label for="query">¿Qué quieres comprar?</label>
+      <textarea id="query" rows="2" placeholder="Ej.: audífonos con cancelación de ruido para el bus, máximo 500 soles, Cusco"></textarea>
+      <div class="ask-row">
+        <div class="examples">
+          <span>Ejemplos:</span>
+          <button class="chip" data-q="IEM con cable para gaming y música, hasta 150 soles, Cusco">IEM gaming S/150</button>
+          <button class="chip" data-q="audífonos over-ear para escuchar música en casa, hasta 350 soles, Cusco">Over-ear S/350</button>
+          <button class="chip" data-q="audífonos inalámbricos con cancelación de ruido para el bus, máximo 500 soles, Cusco">ANC S/500</button>
+        </div>
+        <button id="go" class="primary">Buscar</button>
+      </div>
+      <p class="hint">Di para qué lo usarás, cuánto quieres gastar y en qué ciudad estás. Una búsqueda tarda unos minutos.</p>
+      <p id="error" class="error" hidden></p>
+    </section>
+
+    <ol id="steps" class="steps" hidden>
+      <li data-phase="plan"><b>1. Entender</b><span>Qué necesitas de verdad y cuánto debería costar</span></li>
+      <li data-phase="search"><b>2. Buscar</b><span>Un experto por tienda decide qué buscar</span></li>
+      <li data-phase="check"><b>3. Abrir páginas</b><span>Confirma precio y stock en la página real</span></li>
+      <li data-phase="verify"><b>4. Verificar</b><span>Otro modelo busca réplicas y costos ocultos</span></li>
+      <li data-phase="rank"><b>5. Decidir</b><span>Elige la mejor compra, o te dice que esperes</span></li>
+    </ol>
+
+    <section id="result" class="card result" hidden>
+      <h2>Veredicto</h2>
+      <p id="verdict" class="verdict"></p>
+      <div id="picks" class="picks"></div>
+      <p id="stats" class="muted"></p>
+    </section>
+
+    <div class="grid">
+      <section id="dossier" class="card" hidden>
+        <h2>Lo que entendió</h2>
+        <dl id="dossier-body"></dl>
+      </section>
+
+      <section id="experts-card" class="card" hidden>
+        <h2>Expertos trabajando</h2>
+        <p class="muted">Cada experto es un agente con sus propias herramientas. Solo el orquestador habla con ellos.</p>
+        <div id="experts" class="experts"></div>
+      </section>
+    </div>
+
+    <section id="checks-card" class="card" hidden>
+      <h2>Páginas revisadas</h2>
+      <p class="muted">Cada opción que propuso un experto se volvió a abrir. Si la página no la confirma, se descarta.</p>
+      <ul id="checks" class="checks"></ul>
+    </section>
+
+    <section id="log-card" class="card" hidden>
+      <details>
+        <summary>Avisos</summary>
+        <ul id="log" class="log"></ul>
+      </details>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -27,6 +27,11 @@ pub fn serve(store: &str) -> Result<(), String> {
                 "name": "search",
                 "description": format!("Busca productos en {store} (solo lectura). Devuelve listings JSON con precio en soles."),
                 "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+            }, {
+                "name": "open",
+                "description": format!("Vuelve a abrir un producto de {store} y devuelve lo que dice la página: precio, stock, vendedor, rating."),
+                "inputSchema": {"type": "object", "required": ["url"], "properties": {
+                    "url": {"type": "string"}, "title": {"type": "string", "description": "título del listing; AliExpress lo usa para re-buscar"}}}
             }]})),
             "tools/call" if req["params"]["name"] == "search" => {
                 let query = req["params"]["arguments"]["query"].as_str().unwrap_or("");
@@ -34,6 +39,12 @@ pub fn serve(store: &str) -> Result<(), String> {
                     Ok(l) => json!({"content": [{"type": "text", "text": serde_json::to_string(&l).unwrap()}]}),
                     Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
                 })
+            }
+            "tools/call" if req["params"]["name"] == "open" => {
+                let args = &req["params"]["arguments"];
+                let check = crate::stores::open(&client, store, args["url"].as_str().unwrap_or(""),
+                    args["title"].as_str().unwrap_or(""));
+                Ok(json!({"content": [{"type": "text", "text": serde_json::to_string(&check).unwrap()}]}))
             }
             m => Err(json!({"code": -32601, "message": format!("método no soportado: {m}")})),
         };
@@ -55,6 +66,19 @@ pub struct Client {
 }
 
 impl Client {
+    /// Starts a server from an `mcp.json` entry. `"command": "self"` means this same executable,
+    /// which answers `mcp <store>` before doing anything else (the CLI and the desktop app both do).
+    pub fn from_config(cfg: &Value) -> Result<Self, String> {
+        let self_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let command = match cfg["command"].as_str() {
+            Some("self") | None => self_exe.to_string_lossy().into_owned(),
+            Some(c) => c.to_string(),
+        };
+        let args: Vec<String> =
+            cfg["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
+        Self::spawn(&command, &args)
+    }
+
     pub fn spawn(command: &str, args: &[String]) -> Result<Self, String> {
         let mut child = Command::new(command)
             .args(args)

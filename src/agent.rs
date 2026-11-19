@@ -1,6 +1,6 @@
 //! Experts are agents defined in `experts/*.md`; skills are standard `skills/*/SKILL.md`.
 //! Only the orchestrator invokes an expert, and only the expert sees its own MCP tools.
-use crate::{llm, mcp, stores::Listing};
+use crate::{Emit, llm, mcp, stores::Listing};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -161,32 +161,28 @@ fn failed(reason: String) -> Value {
 
 /// Runs one expert to completion. Always returns a submission, even on failure, so the
 /// orchestrator never waits on an expert that gave up.
-pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill], store: &Store) -> Value {
-    let tag = format!("[{}]", expert.name);
-    let self_exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill], store: &Store, emit: Emit) -> Value {
+    let name = expert.name.as_str();
+    let note = |text: String| emit(json!({"kind": "expert_note", "expert": name, "text": text}));
 
     // Hands: start this expert's MCP servers and namespace their tools as server__tool.
     let mut clients: HashMap<String, mcp::Client> = HashMap::new();
     let mut tools = Vec::new();
     for server in &expert.mcp {
         let Some(cfg) = registry["servers"].get(server) else {
-            println!("{tag} MCP «{server}» no está en mcp.json");
+            note(format!("MCP «{server}» no está en mcp.json"));
             continue;
         };
-        let command = match cfg["command"].as_str() {
-            Some("self") | None => self_exe.as_str(),
-            Some(c) => c,
-        };
-        let args: Vec<String> = cfg["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
-        match mcp::Client::spawn(command, &args).and_then(|mut c| c.list_tools().map(|t| (c, t))) {
+        match mcp::Client::from_config(cfg).and_then(|mut c| c.list_tools().map(|t| (c, t))) {
             Ok((client, declared)) => {
-                for t in declared {
+                // The harness re-opens pages itself; experts spend their steps searching.
+                for t in declared.into_iter().filter(|t| t["name"] != "open") {
                     let name = format!("{server}__{}", t["name"].as_str().unwrap_or("tool"));
                     tools.push(function(&name, t["description"].as_str().unwrap_or(""), t["inputSchema"].clone()));
                 }
                 clients.insert(server.clone(), client);
             }
-            Err(e) => println!("{tag} MCP «{server}» no arrancó: {e}"),
+            Err(e) => note(format!("MCP «{server}» no arrancó: {e}")),
         }
     }
     if clients.is_empty() {
@@ -232,12 +228,12 @@ pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill
             let name = call["function"]["name"].as_str().unwrap_or("");
             let args: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
             if name == "submit" {
-                let mut out = args;
+                let mut out = if args.is_object() { args } else { failed("submit sin objeto".into()) };
                 // Drop ids the expert never saw: it may not invent listings.
                 if let Some(picks) = out["picks"].as_array_mut() {
                     picks.retain(|p| p["id"].as_u64().is_some_and(|id| seen.contains(&(id as usize))));
                 }
-                println!("{tag} entregó {} picks en {} pasos", out["picks"].as_array().map_or(0, |p| p.len()), step + 1);
+                out["steps"] = json!(step + 1);
                 return out;
             }
             let result = match name {
@@ -258,7 +254,7 @@ pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill
                         Ok(text) => match serde_json::from_str::<Vec<Listing>>(&text) {
                             Ok(listings) => {
                                 let ids = store.add(listings);
-                                println!("{tag} {tool} «{}»: {}", args["query"].as_str().unwrap_or(""), ids.len());
+                                emit(json!({"kind": "search", "expert": expert.name, "query": args["query"], "results": ids.len()}));
                                 seen.extend(&ids);
                                 store.table(&ids)
                             }

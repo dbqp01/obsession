@@ -14,12 +14,19 @@ pub fn open(path: &str) -> rusqlite::Result<Connection> {
             relevant INTEGER, trust INTEGER, true_cost_pen REAL, flags TEXT, note TEXT, rank INTEGER, why TEXT,
             PRIMARY KEY (run_id, id));",
     )?;
+    // Older databases predate the report column; adding it twice is the only expected error.
+    let _ = db.execute("ALTER TABLE runs ADD COLUMN report TEXT", []);
     Ok(db)
 }
 
 pub fn new_run(db: &Connection, query: &str, dossier: &Value) -> rusqlite::Result<i64> {
     db.execute("INSERT INTO runs (query, dossier) VALUES (?1, ?2)", params![query, dossier.to_string()])?;
     Ok(db.last_insert_rowid())
+}
+
+pub fn save_report(db: &Connection, run: i64, report: &Value) -> rusqlite::Result<()> {
+    db.execute("UPDATE runs SET report = ?2 WHERE id = ?1", params![run, report.to_string()])?;
+    Ok(())
 }
 
 pub fn save_listings(db: &Connection, run: i64, listings: &[Listing]) -> rusqlite::Result<()> {

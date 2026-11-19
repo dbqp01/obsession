@@ -38,7 +38,18 @@ pub fn search(client: &reqwest::blocking::Client, store: &str, keyword: &str) ->
         "plazavea" => format!("https://www.plazavea.com.pe/api/catalog_system/pub/products/search?ft={}&_from=0&_to=19", q.replace('+', "%20")),
         _ => return Err(format!("tienda desconocida: {store}")),
     };
-    let resp = client.get(&url).send().map_err(|e| format!("{store}: {e}"))?;
+    let body = fetch(client, store, &url)?;
+    let listings = match store {
+        "amazon" => parse_amazon(&body),
+        "aliexpress" => parse_aliexpress(&body),
+        "falabella" => parse_falabella(&body),
+        _ => parse_plazavea(&body),
+    };
+    Ok(listings.into_iter().filter(|l| l.price_pen > 0.0).collect())
+}
+
+fn fetch(client: &reqwest::blocking::Client, store: &str, url: &str) -> Result<String, String> {
+    let resp = client.get(url).send().map_err(|e| format!("{store}: {e}"))?;
     let status = resp.status();
     let body = resp.text().map_err(|e| format!("{store}: {e}"))?;
     // Plaza Vea (VTEX) answers 206 for paged results.
@@ -48,13 +59,177 @@ pub fn search(client: &reqwest::blocking::Client, store: &str, keyword: &str) ->
     if body.contains("account-verification") || (store == "amazon" && body.contains("captcha")) {
         return Err(format!("{store}: bloqueado (verificación anti-bot), no se evade"));
     }
-    let listings = match store {
-        "amazon" => parse_amazon(&body),
-        "aliexpress" => parse_aliexpress(&body),
-        "falabella" => parse_falabella(&body),
-        _ => parse_plazavea(&body),
+    Ok(body)
+}
+
+/// What the product page itself says, read again at verification time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageCheck {
+    pub url: String,
+    pub ok: bool,
+    pub title: Option<String>,
+    pub price_pen: Option<f64>,
+    pub in_stock: Option<bool>,
+    pub seller: Option<String>,
+    pub rating: Option<f64>,
+    pub reviews: Option<u64>,
+    /// "page" = read from the product page; "search_recheck" = the item reappeared in a fresh search.
+    pub method: String,
+    pub note: String,
+}
+
+impl PageCheck {
+    fn failed(url: &str, method: &str, note: String) -> Self {
+        PageCheck { url: url.into(), ok: false, title: None, price_pen: None, in_stock: None, seller: None,
+            rating: None, reviews: None, method: method.into(), note }
+    }
+}
+
+/// Opens one listing again. `title` is only needed for stores whose product page is rendered by
+/// JavaScript (AliExpress): there the check re-runs a search and looks for the same item id.
+pub fn open(client: &reqwest::blocking::Client, store: &str, url: &str, title: &str) -> PageCheck {
+    let expected = |prefix: &str| url.starts_with(prefix);
+    let allowed = match store {
+        "amazon" => expected("https://www.amazon.com/"),
+        "aliexpress" => expected("https://www.aliexpress.com/item/"),
+        "falabella" => expected("https://www.falabella.com.pe/"),
+        "plazavea" => expected("https://www.plazavea.com.pe/"),
+        _ => false,
     };
-    Ok(listings.into_iter().filter(|l| l.price_pen > 0.0).collect())
+    // Trust boundary: the URL comes from a model; never fetch outside the store's own domain.
+    if !allowed {
+        return PageCheck::failed(url, "page", format!("URL fuera de {store}"));
+    }
+    match store {
+        "aliexpress" => recheck_aliexpress(client, url, title),
+        "plazavea" => {
+            // VTEX product pages render prices client-side; its catalog API answers by slug.
+            let slug = url.trim_end_matches("/p").rsplit('/').next().unwrap_or("");
+            let api = format!("https://www.plazavea.com.pe/api/catalog_system/pub/products/search/{slug}/p");
+            match fetch(client, store, &api) {
+                Err(e) => PageCheck::failed(url, "page", e),
+                Ok(body) => page_plazavea(url, &body),
+            }
+        }
+        _ => match fetch(client, store, url) {
+            Err(e) => PageCheck::failed(url, "page", e),
+            Ok(body) if store == "amazon" => page_amazon(url, &body),
+            Ok(body) => page_falabella(url, &body),
+        },
+    }
+}
+
+fn page_amazon(url: &str, html: &str) -> PageCheck {
+    static TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"id="productTitle"[^>]*>\s*([^<]+?)\s*<"#).unwrap());
+    static PRICE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"a-offscreen">([^<]+)<"#).unwrap());
+    static AVAIL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?s)id="availability".*?<span[^>]*>\s*([^<]+?)\s*<"#).unwrap());
+    static SOLD_BY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?s)offer-display-feature-name="desktop-merchant-info"[^>]*class="offer-display-feature-text[^"]*".*?offer-display-feature-text-message">([^<]+)<|(?s)class="offer-display-feature-text[^"]*"[^>]*offer-display-feature-name="desktop-merchant-info".*?offer-display-feature-text-message">([^<]+)<"#).unwrap()
+    });
+    static RATING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"id="acrPopover"[^>]*title="([\d.,]+) de 5"#).unwrap());
+    static REVIEWS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"acrCustomerReviewText"[^>]*>\(?([\d.,]+)"#).unwrap());
+    let Some(title) = TITLE.captures(html).map(|c| unescape(&c[1])) else {
+        return PageCheck::failed(url, "page", "la página no tiene título de producto".into());
+    };
+    let availability = AVAIL.captures(html).map(|c| c[1].to_lowercase());
+    // The "sold by" block, not "ships from" or the payment notes beside it.
+    let seller = SOLD_BY.captures(html).and_then(|c| c.get(1).or(c.get(2))).map(|m| m.as_str().trim().to_string());
+    PageCheck {
+        url: url.into(),
+        ok: true,
+        title: Some(title),
+        price_pen: PRICE.captures(html).map(|c| price(&c[1])).filter(|p| *p > 0.0),
+        in_stock: availability.as_deref().map(|a| a.contains("disponible") && !a.contains("no disponible")),
+        seller,
+        rating: RATING.captures(html).map(|c| price(&c[1])),
+        reviews: REVIEWS.captures(html).and_then(|c| c[1].replace([',', '.'], "").parse().ok()),
+        method: "page".into(),
+        note: availability.unwrap_or_else(|| "sin dato de disponibilidad".into()),
+    }
+}
+
+fn page_falabella(url: &str, html: &str) -> PageCheck {
+    static LD: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?s)<script type="application/ld\+json"[^>]*>(.*?)</script>"#).unwrap());
+    static SELLER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""sellerName":"([^"]+)""#).unwrap());
+    let product = LD
+        .captures_iter(html)
+        .filter_map(|c| serde_json::from_str::<Value>(&c[1]).ok())
+        .find(|v| v["@type"] == "Product");
+    let Some(product) = product else {
+        return PageCheck::failed(url, "page", "la página no trae datos de producto".into());
+    };
+    let offers: Vec<&Value> = match &product["offers"] {
+        Value::Array(a) => a.iter().collect(),
+        o @ Value::Object(_) => vec![o],
+        _ => vec![],
+    };
+    // Falabella lists the internet price and the normal price; the buyer pays the lowest.
+    let best = offers
+        .iter()
+        .filter_map(|o| o["price"].as_str().map(price).or(o["price"].as_f64()))
+        .fold(None::<f64>, |m, p| Some(m.map_or(p, |m| m.min(p))));
+    PageCheck {
+        url: url.into(),
+        ok: true,
+        title: product["name"].as_str().map(String::from),
+        price_pen: best,
+        in_stock: Some(offers.iter().any(|o| o["availability"].as_str().is_some_and(|a| a.ends_with("InStock")))),
+        seller: SELLER.captures(html).map(|c| c[1].to_string()),
+        rating: product["aggregateRating"]["ratingValue"].as_f64(),
+        reviews: product["aggregateRating"]["reviewCount"].as_u64(),
+        method: "page".into(),
+        note: String::new(),
+    }
+}
+
+fn page_plazavea(url: &str, json: &str) -> PageCheck {
+    let Ok(Value::Array(items)) = serde_json::from_str(json) else {
+        return PageCheck::failed(url, "page", "respuesta inesperada del catálogo".into());
+    };
+    let Some(x) = items.first() else {
+        return PageCheck::failed(url, "page", "el producto ya no existe".into());
+    };
+    let seller = &x["items"][0]["sellers"][0];
+    let offer = &seller["commertialOffer"];
+    PageCheck {
+        url: url.into(),
+        ok: true,
+        title: x["productName"].as_str().map(String::from),
+        price_pen: offer["Price"].as_f64(),
+        in_stock: Some(offer["AvailableQuantity"].as_f64().unwrap_or(0.0) > 0.0),
+        seller: seller["sellerName"].as_str().map(String::from),
+        rating: None,
+        reviews: None,
+        method: "page".into(),
+        note: String::new(),
+    }
+}
+
+/// shortcut: AliExpress item pages need JavaScript, so this only proves the item is still listed
+/// at that price in a fresh search; it cannot see stock or the store. Use a browser-backed MCP to go deeper.
+fn recheck_aliexpress(client: &reqwest::blocking::Client, url: &str, title: &str) -> PageCheck {
+    let method = "search_recheck";
+    let query: String = title.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+    match search(client, "aliexpress", &query) {
+        Err(e) => PageCheck::failed(url, method, e),
+        Ok(found) => match found.into_iter().find(|l| l.url == url) {
+            None => PageCheck::failed(url, method, format!("no reapareció al buscar «{query}»")),
+            Some(l) => PageCheck {
+                url: url.into(),
+                ok: true,
+                title: Some(l.title),
+                price_pen: Some(l.price_pen),
+                in_stock: None,
+                seller: None,
+                rating: l.rating,
+                reviews: None,
+                method: method.into(),
+                note: l.sold.unwrap_or_default(),
+            },
+        },
+    }
 }
 
 fn encode(s: &str) -> String {
@@ -192,6 +367,36 @@ mod tests {
         let l = &parse_amazon(html)[0];
         assert_eq!((l.title.as_str(), l.price_pen, l.rating), ("FiiO JT3 & cable", 204.62, Some(4.5)));
         assert_eq!(l.url, "https://www.amazon.com/-/es/FiiO-JT3/dp/B0ABCDEFGH");
+    }
+
+    #[test]
+    fn reads_product_pages() {
+        let amz = r#"<span id="productTitle" class="a">  FiiO JT3  </span><span class="a-offscreen">PEN 204.62</span>
+            <div id="availability" class="x"> <span class="a"> Disponible </span></div>
+            <div offer-display-feature-name="desktop-fulfiller-info"><span class="offer-display-feature-text-message">Amazon</span></div>
+            <div class="offer-display-feature-text a-size-small" offer-display-feature-name="desktop-merchant-info"><span class="offer-display-feature-text-message">FiiO Store</span></div>
+            <div offer-display-feature-name="desktop-dynamic-secure-transaction"><span class="offer-display-feature-text-message">Transacción segura</span></div>
+            <span id="acrPopover" title="4.6 de 5 estrellas"></span><span id="acrCustomerReviewText" aria-label="x">(1,234)</span>"#;
+        let c = page_amazon("u", amz);
+        assert_eq!((c.ok, c.price_pen, c.in_stock, c.seller.as_deref()), (true, Some(204.62), Some(true), Some("FiiO Store")));
+        assert_eq!((c.rating, c.reviews), (Some(4.6), Some(1234)));
+
+        let fal = r#"<script type="application/ld+json">{"@type":"Product","name":"ATH M40X","offers":[
+            {"price":"510","availability":"https://schema.org/InStock"},{"price":"619","availability":"https://schema.org/InStock"}]}</script>
+            "sellerName":"Live Music""#;
+        let c = page_falabella("u", fal);
+        assert_eq!((c.price_pen, c.in_stock, c.seller.as_deref()), (Some(510.0), Some(true), Some("Live Music")));
+
+        let pv = r#"[{"productName":"Space One","items":[{"sellers":[{"sellerName":"SanyPeru","commertialOffer":{"Price":399.0,"AvailableQuantity":0}}]}]}]"#;
+        let c = page_plazavea("u", pv);
+        assert_eq!((c.price_pen, c.in_stock), (Some(399.0), Some(false)));
+        assert!(!page_plazavea("u", "[]").ok);
+    }
+
+    #[test]
+    fn open_refuses_other_domains() {
+        let c = open(&client(), "amazon", "https://evil.example.com/dp/B000000000", "");
+        assert!(!c.ok && c.note.contains("fuera"));
     }
 
     #[test]

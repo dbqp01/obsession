@@ -1,0 +1,15 @@
+{
+  "note": "Consultas fijas para medir Obsession. Cambiarlas rompe la comparación entre corridas.",
+  "cases": [
+    {"id": "iem-80",       "query": "audífonos IEM con cable para escuchar música en el bus, máximo 80 soles, Cusco"},
+    {"id": "iem-gaming-150","query": "IEM con cable para gaming y música, hasta 150 soles, Cusco"},
+    {"id": "overear-350",  "query": "audífonos over-ear para escuchar música en casa, hasta 350 soles, Cusco"},
+    {"id": "anc-500",      "query": "audífonos inalámbricos con cancelación de ruido para el bus, máximo 500 soles, Cusco"},
+    {"id": "tws-200",      "query": "audífonos true wireless para hacer ejercicio, resistentes al sudor, hasta 200 soles, Cusco"},
+    {"id": "gamer-250",    "query": "headset gamer con micrófono para PC, hasta 250 soles, Cusco"},
+    {"id": "studio-600",   "query": "audífonos de estudio para mezclar música, hasta 600 soles, Lima"},
+    {"id": "sony-xm5-450", "query": "Sony WH-1000XM5 nuevo por 450 soles, ¿dónde lo encuentro? Cusco"},
+    {"id": "airpods-pro-90","query": "AirPods Pro 2 originales a 90 soles, Cusco"},
+    {"id": "wait-xm6-900", "query": "quiero los Sony WH-1000XM6 pero solo tengo 900 soles y no estoy apurado, Cusco"}
+  ]
+}
