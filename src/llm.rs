@@ -38,6 +38,34 @@ pub fn chat_json(model: &str, system: &str, user: &str) -> Result<Value, String>
     Err(last_err)
 }
 
+/// One agent step: sends the conversation with tools and returns the assistant message.
+/// `force` makes the model call a tool instead of answering in prose.
+pub fn chat_tools(model: &str, messages: &[Value], tools: &[Value], force: bool) -> Result<Value, String> {
+    let base = std::env::var("MAGPIE_URL").unwrap_or_else(|_| "http://127.0.0.1:3425/v1".into());
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let body = json!({
+        "model": model, "messages": messages, "tools": tools, "max_tokens": 4000,
+        "tool_choice": if force { "required" } else { "auto" },
+    });
+    let mut last_err = String::new();
+    for _ in 0..2 {
+        match client
+            .post(format!("{base}/chat/completions"))
+            .json(&body)
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.json::<Value>())
+        {
+            Ok(r) => return Ok(r["choices"][0]["message"].clone()),
+            Err(e) => last_err = format!("{model}: {e}"),
+        }
+    }
+    Err(last_err)
+}
+
 /// Takes the outermost JSON object or array out of a reply that may carry fences or prose.
 pub fn extract_json(text: &str) -> Option<Value> {
     let start = text.find(['{', '['])?;

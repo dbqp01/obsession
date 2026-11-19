@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "amazon":     {"command": "self", "args": ["mcp", "amazon"]},
+    "aliexpress": {"command": "self", "args": ["mcp", "aliexpress"]},
+    "falabella":  {"command": "self", "args": ["mcp", "falabella"]},
+    "plazavea":   {"command": "self", "args": ["mcp", "plazavea"]}
+  }
+}

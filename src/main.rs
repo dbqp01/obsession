@@ -1,34 +1,38 @@
+mod agent;
 mod db;
 mod llm;
 mod mcp;
 mod stores;
 
+use agent::{Expert, Store};
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use stores::Listing;
 
 const PLANNER: &str = include_str!("../prompts/planner.md");
 const VERIFIER: &str = include_str!("../prompts/verifier.md");
 const RANKER: &str = include_str!("../prompts/ranker.md");
-const PER_STORE: usize = 12;
 const VERIFY_BATCH: usize = 15;
+const MAX_ROUNDS: usize = 2;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
+    let result: Result<(), Box<dyn std::error::Error>> = match args.first().map(String::as_str) {
         Some("mcp") => mcp::serve(args.get(1).map(String::as_str).unwrap_or("")).map_err(Into::into),
-        Some("experts") => load_catalog().map(|c| {
-            for e in c {
-                println!("{:<12} {:<14} {}", e["id"].as_str().unwrap_or("?"), e["region"].as_str().unwrap_or(""),
-                    e["description"].as_str().unwrap_or(""));
+        Some("experts") => agent::load_experts("experts").map_err(Into::into).map(|experts| {
+            for e in experts {
+                println!("{:<12} mcp: {:<12} {}", e.name, e.mcp.join(","), e.description);
+            }
+        }),
+        Some("skills") => agent::load_skills("skills").map_err(Into::into).map(|skills| {
+            for s in skills {
+                println!("{:<22} {}", s.name, s.description);
             }
         }),
         Some(_) => run(&args.join(" ")),
         None => {
-            eprintln!("uso:
-  obsession \"audífonos over-ear hasta 350 soles, Cusco\"
-  obsession experts
-  obsession mcp <tienda>");
+            eprintln!(
+                "uso:\n  obsession \"audífonos over-ear hasta 350 soles, Cusco\"\n  obsession experts | skills\n  obsession mcp <tienda>"
+            );
             std::process::exit(2);
         }
     };
@@ -42,158 +46,146 @@ fn model(var: &str, default: &str) -> String {
     std::env::var(var).unwrap_or_else(|_| default.into())
 }
 
+/// The experts whose names the model chose; all of them if it chose none, so a round is never empty.
+fn pick<'a>(experts: &'a [Expert], names: &Value) -> Vec<&'a Expert> {
+    let chosen: Vec<&Expert> = experts
+        .iter()
+        .filter(|e| names.as_array().is_some_and(|n| n.iter().any(|x| x == e.name.as_str())))
+        .collect();
+    if chosen.is_empty() { experts.iter().collect() } else { chosen }
+}
+
 fn run(query: &str) -> Result<(), Box<dyn std::error::Error>> {
     let main_model = model("OBSESSION_MAIN", "commandcode-plan/deepseek/deepseek-v4.1-flash");
-    // Different model family on purpose: the verifier should not share the finder's blind spots.
+    // Different model family on purpose: the verifier should not share the finders' blind spots.
     let verifier_model = model("OBSESSION_VERIFIER", "zcode/GLM-5.3-Flash");
+    let experts = agent::load_experts("experts")?;
+    let skills = agent::load_skills("skills")?;
+    let registry: Value =
+        serde_json::from_str(&std::fs::read_to_string("mcp.json").map_err(|e| format!("mcp.json: {e}"))?)?;
+    // The orchestrator only ever sees names and descriptions, never an expert's tools.
+    let menu: Vec<Value> = experts.iter().map(|e| json!({"name": e.name, "description": e.description})).collect();
 
-    let catalog = load_catalog()?;
-    let menu: Vec<Value> = catalog
-        .iter()
-        .map(|e| json!({"id": e["id"], "description": e["description"], "region": e["region"], "categories": e["categories"]}))
-        .collect();
     println!("[plan] {main_model} estudia el producto…");
     let dossier = llm::chat_json(&main_model, PLANNER, &json!({"query": query, "experts": menu}).to_string())?;
-    let chosen: Vec<&Value> = catalog
-        .iter()
-        .filter(|e| dossier["experts"].as_array().is_some_and(|ids| ids.contains(&e["id"])))
-        .collect();
-    // A planner that picks nothing valid should not leave the swarm empty.
-    let chosen = if chosen.is_empty() { catalog.iter().collect() } else { chosen };
-    let keywords: Vec<String> = dossier["keywords"]
-        .as_array()
-        .ok_or("el dossier no trae keywords")?
-        .iter()
-        .filter_map(|k| k.as_str().map(String::from))
-        .take(5)
-        .collect();
     println!("[plan] necesidad: {}", dossier["need"].as_str().unwrap_or("?"));
-    println!("[plan] keywords: {}", keywords.join(" | "));
-    println!("[plan] expertos: {}", chosen.iter().filter_map(|e| e["id"].as_str()).collect::<Vec<_>>().join(", "));
+    let mut chosen = pick(&experts, &dossier["experts"]);
 
-    let listings = search_all(&chosen, &keywords);
-    println!("[search] {} listings únicos", listings.len());
-    if listings.is_empty() {
-        return Err("ninguna tienda devolvió resultados".into());
+    let store = Store::default();
+    let mut verdicts: Vec<Value> = Vec::new();
+    let mut verified_ids: HashSet<u64> = HashSet::new();
+    let mut hint = String::new();
+    let mut ranking = json!({});
+    for round in 1..=MAX_ROUNDS {
+        let names: Vec<&str> = chosen.iter().map(|e| e.name.as_str()).collect();
+        println!("\n[ronda {round}] expertos: {}", names.join(", "));
+        let task = json!({
+            "query": query, "need": dossier["need"], "budget_pen": dossier["budget_pen"],
+            "location": dossier["location"], "fair_price_pen": dossier["fair_price_pen"],
+            "candidates": dossier["candidates"], "category_jumps": dossier["category_jumps"],
+            "defects_to_watch": dossier["defects_to_watch"], "orchestrator_hint": hint,
+        })
+        .to_string();
+        let submissions: Vec<(String, Value)> = std::thread::scope(|s| {
+            let handles: Vec<_> = chosen
+                .iter()
+                .map(|e| {
+                    let (task, registry, skills, store) = (&task, &registry, &skills, &store);
+                    s.spawn(move || (e.name.clone(), agent::run_expert(e, task, registry, skills, store)))
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+
+        // Only what an expert chose to defend reaches the verifier.
+        let mut items = Vec::new();
+        for (name, sub) in &submissions {
+            for p in sub["picks"].as_array().into_iter().flatten() {
+                let Some(id) = p["id"].as_u64() else { continue };
+                let Some(l) = store.get(id as usize) else { continue };
+                if verified_ids.insert(id) {
+                    let mut v = serde_json::to_value(&l)?;
+                    v["id"] = json!(id);
+                    v["expert"] = json!(name);
+                    v["expert_why"] = p["why"].clone();
+                    items.push(v);
+                }
+            }
+        }
+        if !items.is_empty() {
+            println!("[verify] {verifier_model} revisa {} picks nuevos…", items.len());
+            let sent: HashSet<u64> = items.iter().filter_map(|v| v["id"].as_u64()).collect();
+            // A verdict for an id we did not send would "verify" a listing nobody checked.
+            verdicts.extend(
+                verify(&verifier_model, &main_model, &dossier, &items)
+                    .into_iter()
+                    .filter(|v| v["id"].as_u64().is_some_and(|id| sent.contains(&id))),
+            );
+        }
+        let verified: Vec<Value> = verdicts
+            .iter()
+            .filter(|v| v["relevant"].as_bool() == Some(true))
+            .filter_map(|v| {
+                let l = store.get(v["id"].as_u64()? as usize)?;
+                Some(json!({"id": v["id"], "store": l.store, "title": l.title, "price_pen": l.price_pen,
+                    "seller": l.seller, "rating": l.rating, "sold": l.sold, "trust": v["trust"],
+                    "true_cost_pen": v["true_cost_pen"], "flags": v["flags"], "note": v["note"]}))
+            })
+            .collect();
+        println!("[verify] {} relevantes en total", verified.len());
+
+        let reports: Vec<Value> = submissions
+            .iter()
+            .map(|(n, s)| json!({"expert": n, "tried": s["tried"], "missing": s["missing"]}))
+            .collect();
+        println!("[rank] {main_model} decide…");
+        let input = json!({"query": query, "dossier": dossier, "verified_listings": verified,
+            "expert_reports": reports, "experts": menu, "round": round, "max_rounds": MAX_ROUNDS});
+        match llm::chat_json(&main_model, RANKER, &input.to_string()) {
+            Ok(r) => ranking = r,
+            // Keep the previous round's decision rather than lose the whole run.
+            Err(e) if round > 1 => {
+                println!("[rank] ronda {round} falló, me quedo con la anterior: {e}");
+                break;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let relevant: HashSet<u64> = verified.iter().filter_map(|v| v["id"].as_u64()).collect();
+        if let Some(picks) = ranking["picks"].as_array_mut() {
+            picks.retain(|p| p["id"].as_u64().is_some_and(|id| relevant.contains(&id)));
+        }
+        if ranking["satisfied"].as_bool() != Some(false) || round == MAX_ROUNDS {
+            break;
+        }
+        hint = ranking["next_round"]["hint"].as_str().unwrap_or("").to_string();
+        chosen = pick(&experts, &ranking["next_round"]["experts"]);
+        println!("[rank] no satisfecho: {hint}");
     }
 
+    let listings = store.all();
     let db = db::open("obsession.db")?;
     let run = db::new_run(&db, query, &dossier)?;
     db::save_listings(&db, run, &listings)?;
-
-    println!("[verify] {verifier_model} revisa {} listings…", listings.len());
-    let verdicts = verify(&verifier_model, &main_model, &dossier, &listings);
     for v in &verdicts {
         db::save_verdict(&db, run, v)?;
     }
-    let verified: Vec<Value> = verdicts
-        .iter()
-        .filter(|v| v["relevant"].as_bool() == Some(true))
-        .filter_map(|v| {
-            let l = listings.get(v["id"].as_u64()? as usize)?;
-            Some(json!({"id": v["id"], "store": l.store, "title": l.title, "price_pen": l.price_pen,
-                "seller": l.seller, "rating": l.rating, "sold": l.sold,
-                "trust": v["trust"], "true_cost_pen": v["true_cost_pen"], "flags": v["flags"], "note": v["note"]}))
-        })
-        .collect();
-    println!("[verify] {} de {} son relevantes", verified.len(), verdicts.len());
-
-    println!("[rank] {main_model} decide…");
-    let input = json!({"query": query, "dossier": dossier, "verified_listings": verified});
-    let ranking = llm::chat_json(&main_model, RANKER, &input.to_string())?;
     db::save_ranking(&db, run, &ranking)?;
-
     let csv_path = format!("run-{run}.csv");
     let rows = db::export_csv(&db, run, &csv_path)?;
     println!("\n== Veredicto ==\n{}\n", ranking["verdict"].as_str().unwrap_or("(sin veredicto)"));
-    for (i, pick) in ranking["picks"].as_array().into_iter().flatten().enumerate() {
-        let Some(l) = pick["id"].as_u64().and_then(|id| listings.get(id as usize)) else { continue };
+    for (i, p) in ranking["picks"].as_array().into_iter().flatten().enumerate() {
+        let Some(l) = p["id"].as_u64().and_then(|id| listings.get(id as usize)) else { continue };
         println!("{}. [{}] {} — S/ {:.2}\n   {}\n   {}", i + 1, l.store, l.title, l.price_pen, l.url,
-            pick["why"].as_str().unwrap_or(""));
+            p["why"].as_str().unwrap_or(""));
     }
-    println!("\n{rows} listings verificados en {csv_path} (run {run} en obsession.db)");
+    println!("\n{} listings vistos, {rows} verificados en {csv_path} (run {run} en obsession.db)", listings.len());
     Ok(())
 }
 
-fn load_catalog() -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let path = std::env::var("OBSESSION_EXPERTS").unwrap_or_else(|_| "experts.json".into());
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-    let catalog: Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
-    Ok(catalog["experts"].as_array().ok_or(format!("{path}: falta \"experts\""))?.clone())
-}
-
-/// The swarm: one MCP server per chosen expert, each in its own thread, running every keyword.
-/// shortcut: an external expert must return `Listing`-shaped JSON; add a mapping step when one doesn't.
-fn search_all(experts: &[&Value], keywords: &[String]) -> Vec<Listing> {
-    let self_exe = std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    let per_expert: Vec<Vec<Listing>> = std::thread::scope(|s| {
-        let handles: Vec<_> = experts
-            .iter()
-            .map(|e| {
-                let self_exe = &self_exe;
-                s.spawn(move || {
-                    let id = e["id"].as_str().unwrap_or("?");
-                    let command = match e["command"].as_str() {
-                        Some("self") | None => self_exe.as_str(),
-                        Some(c) => c,
-                    };
-                    let args: Vec<String> =
-                        e["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
-                    let tool = e["tool"].as_str().unwrap_or("search");
-                    let mut client = match mcp::Client::spawn(command, &args) {
-                        Ok(c) => c,
-                        Err(err) => {
-                            println!("[search] {id}: no arrancó ({err})");
-                            return vec![];
-                        }
-                    };
-                    let mut found = Vec::new();
-                    for kw in keywords {
-                        let result = client
-                            .call(tool, json!({"query": kw}))
-                            .and_then(|t| serde_json::from_str::<Vec<Listing>>(&t).map_err(|e| e.to_string()));
-                        match result {
-                            Ok(mut l) => {
-                                println!("[search] {id} «{kw}»: {}", l.len());
-                                found.append(&mut l);
-                            }
-                            Err(err) => {
-                                println!("[search] {id}: {err}");
-                                break; // a blocked store stays blocked for the other keywords
-                            }
-                        }
-                    }
-                    found
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
-    });
-    let mut seen = HashSet::new();
-    per_expert
-        .into_iter()
-        .flat_map(|l| l.into_iter().filter(|x| seen.insert(x.url.clone())).take(PER_STORE).collect::<Vec<_>>())
-        .collect()
-}
-
 /// Batches go out in parallel; a batch that fails twice goes to the fallback model, then stays unverified.
-fn verify(model: &str, fallback: &str, dossier: &Value, listings: &[Listing]) -> Vec<Value> {
-    let batches: Vec<Value> = listings
-        .chunks(VERIFY_BATCH)
-        .enumerate()
-        .map(|(b, chunk)| {
-            let items: Vec<Value> = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, l)| {
-                    let mut v = serde_json::to_value(l).unwrap();
-                    v["id"] = json!(b * VERIFY_BATCH + i);
-                    v
-                })
-                .collect();
-            json!({"dossier": dossier, "listings": items})
-        })
-        .collect();
+fn verify(model: &str, fallback: &str, dossier: &Value, items: &[Value]) -> Vec<Value> {
+    let batches: Vec<Value> =
+        items.chunks(VERIFY_BATCH).map(|chunk| json!({"dossier": dossier, "listings": chunk})).collect();
     std::thread::scope(|s| {
         let handles: Vec<_> = batches
             .iter()

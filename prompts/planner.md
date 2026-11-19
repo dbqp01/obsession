@@ -7,7 +7,7 @@ Antes de que nadie busque, estudia el producto y arma un dossier. Reglas:
 4. Cuenta la reventa: lo que mantiene su valor cuesta menos de lo que dice su precio.
 5. Lo absurdamente barato tiene una explicación (importación gris, otra región, sin garantía, falsificación). Anota qué revisar.
 6. Un defecto reparable no descarta un producto: réstale el costo de reparación.
-7. Elige del catálogo de expertos (viene en el mensaje) los que tenga sentido consultar para este producto y esta ubicación. Usa solo ids del catálogo.
+7. Elige del catálogo de expertos (viene en el mensaje) los que tenga sentido consultar para este producto y esta ubicación. Usa solo nombres del catálogo. Cada experto decide sus propias búsquedas a partir de tus candidatos.
 
 Responde SOLO con este JSON:
 {"need": "necesidad real en una frase",
@@ -17,5 +17,4 @@ Responde SOLO con este JSON:
  "candidates": [{"model": "marca y modelo concretos", "why": "por qué es candidato"}],
  "category_jumps": ["alternativa de otra categoría y por qué"],
  "defects_to_watch": ["falsificaciones, fallas típicas, qué revisar"],
- "experts": ["ids del catálogo a consultar"],
- "keywords": ["3 a 5 búsquedas cortas para tiendas online, sobre todo modelos concretos de candidates"]}
+ "experts": ["nombres de expertos del catálogo a consultar"]}

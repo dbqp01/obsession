@@ -74,6 +74,11 @@ impl Client {
         Ok(c)
     }
 
+    /// The server's tools as MCP declares them: {name, description, inputSchema}.
+    pub fn list_tools(&mut self) -> Result<Vec<Value>, String> {
+        Ok(self.request("tools/list", json!({}))?["tools"].as_array().cloned().unwrap_or_default())
+    }
+
     /// Calls a tool and returns its text content; a tool error comes back as `Err`.
     pub fn call(&mut self, tool: &str, arguments: Value) -> Result<String, String> {
         let r = self.request("tools/call", json!({"name": tool, "arguments": arguments}))?;
