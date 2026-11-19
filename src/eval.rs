@@ -10,9 +10,17 @@ Recomienda la mejor compra para la consulta. Responde SOLO JSON: \
 {\"pick\": \"marca y modelo\", \"price_pen\": número estimado, \"where\": \"dónde comprarlo\", \"why\": \"una frase\"}";
 const TIME_LIMIT_S: u64 = 300;
 
+/// The store refused the re-check: that says nothing about the pick itself.
+fn blocked(recheck: &stores::PageCheck) -> bool {
+    !recheck.ok && recheck.note.contains(stores::BLOCKED)
+}
+
 /// A pick is false if its page no longer confirms it, its price moved more than the tolerance,
-/// or the verifier itself flagged it as an accessory.
+/// or the verifier itself flagged it as an accessory. A blocked re-check is counted apart.
 fn pick_problem(pick: &Value, recheck: &stores::PageCheck) -> Option<String> {
+    if blocked(recheck) {
+        return None;
+    }
     if !recheck.ok {
         return Some(format!("no abre: {}", recheck.note));
     }
@@ -54,7 +62,7 @@ pub fn run(root: &Path, only: Option<&str>, emit: Emit) -> Result<Value, Box<dyn
                         let recheck = stores::open(&client, p["store"].as_str().unwrap_or(""),
                             p["url"].as_str().unwrap_or(""), p["title"].as_str().unwrap_or(""));
                         json!({"title": p["title"], "store": p["store"], "url": p["url"], "price_pen": p["price_pen"],
-                            "problem": pick_problem(p, &recheck)})
+                            "problem": pick_problem(p, &recheck), "blocked": blocked(&recheck)})
                     })
                     .collect();
                 json!({"id": id, "query": query, "ok": true, "elapsed_s": elapsed, "rounds": report["rounds"],
@@ -79,9 +87,10 @@ fn summarize(rows: &[Value]) -> Value {
     let fast = rows.iter().filter(|r| r["ok"] == true && r["elapsed_s"].as_u64().is_some_and(|s| s <= TIME_LIMIT_S)).count();
     let picks: Vec<&Value> = rows.iter().flat_map(|r| r["picks"].as_array().into_iter().flatten()).collect();
     let false_picks = picks.iter().filter(|p| !p["problem"].is_null()).count();
+    let not_rechecked = picks.iter().filter(|p| p["blocked"] == true).count();
     let second_rounds = rows.iter().filter(|r| r["rounds"].as_u64().is_some_and(|n| n >= 2)).count();
     json!({"cases": total, "completed": ok, "under_5_min": fast, "picks": picks.len(),
-        "false_picks": false_picks, "second_rounds": second_rounds})
+        "false_picks": false_picks, "not_rechecked_blocked": not_rechecked, "second_rounds": second_rounds})
 }
 
 fn markdown(out: &Value) -> String {
@@ -89,9 +98,11 @@ fn markdown(out: &Value) -> String {
     let mut md = format!(
         "# Eval de Obsession\n\n| Criterio | Resultado | Meta |\n|---|---|---|\n\
          | Corridas sin error | {}/{} | 10/10 |\n| Menos de 5 min | {}/{} | 10/10 |\n\
-         | Picks falsos | {} de {} | 0 |\n| Casos con ronda 2 | {} | ≥ 1 que mejore |\n\
+         | Picks falsos | {} de {} | 0 |\n| Sin recomprobar (la tienda bloqueó) | {} | — |\n\
+         | Casos con ronda 2 | {} | ≥ 1 que mejore |\n\
          | Obsession ≥ IA sin tools | (lo marcas tú abajo) | ≥ 7/10 |\n\n",
-        s["completed"], s["cases"], s["under_5_min"], s["cases"], s["false_picks"], s["picks"], s["second_rounds"]
+        s["completed"], s["cases"], s["under_5_min"], s["cases"], s["false_picks"], s["picks"],
+        s["not_rechecked_blocked"], s["second_rounds"]
     );
     for r in out["rows"].as_array().into_iter().flatten() {
         md += &format!("## {} — {}\n\n", r["id"].as_str().unwrap_or(""), r["query"].as_str().unwrap_or(""));
@@ -101,7 +112,11 @@ fn markdown(out: &Value) -> String {
             md += &format!("{} s · {} ronda(s)\n\n**Obsession:** {}\n\n", r["elapsed_s"], r["rounds"],
                 r["verdict"].as_str().unwrap_or("(sin veredicto)"));
             for p in r["picks"].as_array().into_iter().flatten() {
-                let status = p["problem"].as_str().map(|x| format!(" ⚠ {x}")).unwrap_or(" ✓".into());
+                let status = match p["problem"].as_str() {
+                    Some(x) => format!(" ⚠ {x}"),
+                    None if p["blocked"] == true => " · sin recomprobar: la tienda bloqueó".into(),
+                    None => " ✓".into(),
+                };
                 md += &format!("- [{}] {} — S/{} ({}){status}\n", p["store"].as_str().unwrap_or(""),
                     p["title"].as_str().unwrap_or(""), p["price_pen"], p["url"].as_str().unwrap_or(""));
             }
@@ -130,5 +145,8 @@ mod tests {
         assert!(pick_problem(&pick, &check(false, None)).unwrap().starts_with("no abre"));
         let accessory = json!({"price_pen": 100.0, "flags": ["accesorio"]});
         assert_eq!(pick_problem(&accessory, &check(true, Some(100.0))).unwrap(), "es un accesorio");
+        let mut refused = check(false, None);
+        refused.note = format!("amazon: {}", stores::BLOCKED);
+        assert!(pick_problem(&pick, &refused).is_none() && blocked(&refused), "a store block is not a false pick");
     }
 }

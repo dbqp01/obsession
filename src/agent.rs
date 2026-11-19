@@ -203,11 +203,14 @@ pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill
     let system = format!("{HARNESS}\n\n{}\n\nSkills disponibles:\n{skill_menu}", expert.body);
     let mut messages = vec![json!({"role": "system", "content": system}), json!({"role": "user", "content": task})];
     let mut seen: Vec<usize> = Vec::new();
+    let mut blocked = false;
 
     for step in 0..expert.max_steps {
-        let last = step + 1 == expert.max_steps;
+        // A store that blocks stays blocked: more searches only burn steps.
+        let last = blocked || step + 1 == expert.max_steps;
         if last {
-            messages.push(json!({"role": "user", "content": "Último paso: llama a submit ahora con lo que tienes."}));
+            let why = if blocked { "La tienda bloqueó las búsquedas." } else { "Último paso." };
+            messages.push(json!({"role": "user", "content": format!("{why} Llama a submit ahora con lo que tienes.")}));
         }
         let offered = if last { vec![submit_tool()] } else { tools.clone() };
         let msg = match llm::chat_tools(&expert.model, &messages, &offered, last) {
@@ -253,6 +256,7 @@ pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill
                         Err(e) => {
                             // Surface it: otherwise a failing source just looks like "0 picks".
                             note(format!("{tool} falló: {e}"));
+                            blocked |= e.contains(crate::stores::BLOCKED);
                             format!("error: {e}")
                         }
                         Ok(text) => match serde_json::from_str::<Vec<Listing>>(&text)

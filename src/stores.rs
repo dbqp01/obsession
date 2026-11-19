@@ -53,11 +53,15 @@ fn fetch(client: &reqwest::blocking::Client, store: &str, url: &str) -> Result<S
     let status = resp.status();
     let body = resp.text().map_err(|e| format!("{store}: {e}"))?;
     // Plaza Vea (VTEX) answers 206 for paged results.
+    // 429 and 503 are how these stores throttle automated traffic: a block, not an outage.
+    if matches!(status.as_u16(), 429 | 503) {
+        return Err(format!("{store}: HTTP {status}, {BLOCKED}"));
+    }
     if !status.is_success() {
         return Err(format!("{store}: HTTP {status}"));
     }
     if is_challenge(store, &body) {
-        return Err(format!("{store}: bloqueado (verificación anti-bot), no se evade"));
+        return Err(format!("{store}: {BLOCKED}"));
     }
     Ok(body)
 }
@@ -211,31 +215,48 @@ fn page_plazavea(url: &str, json: &str) -> PageCheck {
 /// at that price in a fresh search; it cannot see stock or the store. Use a browser-backed MCP to go deeper.
 fn recheck_aliexpress(client: &reqwest::blocking::Client, url: &str, title: &str) -> PageCheck {
     let method = "search_recheck";
-    let query: String = title.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
-    match search(client, "aliexpress", &query) {
-        Err(e) => PageCheck::failed(url, method, e),
-        Ok(found) => match found.into_iter().find(|l| l.url == url) {
-            None => PageCheck::failed(url, method, format!("no reapareció al buscar «{query}»")),
-            Some(l) => PageCheck {
-                url: url.into(),
-                ok: true,
-                title: Some(l.title),
-                price_pen: Some(l.price_pen),
-                in_stock: None,
-                seller: None,
-                rating: l.rating,
-                reviews: None,
-                method: method.into(),
-                note: l.sold.unwrap_or_default(),
-            },
+    // Search ranking shifts between calls; a shorter brand+model query often brings the item back.
+    let words: Vec<&str> = title.split_whitespace().collect();
+    let queries: Vec<String> = [6, 3].iter().map(|&n| words.iter().take(n).copied().collect::<Vec<_>>().join(" ")).collect();
+    let mut found = None;
+    for query in queries.iter().filter(|q| !q.is_empty()) {
+        match search(client, "aliexpress", query) {
+            Err(e) => return PageCheck::failed(url, method, e),
+            Ok(list) => {
+                found = list.into_iter().find(|l| l.url == url);
+                if found.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+    match found {
+        None => PageCheck::failed(url, method, format!("no reapareció al buscar «{}»", queries.join("» ni «"))),
+        Some(l) => PageCheck {
+            url: url.into(),
+            ok: true,
+            title: Some(l.title),
+            price_pen: Some(l.price_pen),
+            in_stock: None,
+            seller: None,
+            rating: l.rating,
+            reviews: None,
+            method: method.into(),
+            note: l.sold.unwrap_or_default(),
         },
     }
 }
 
-/// Bot challenges (Akamai bm-verify, captcha pages) are reported as blocks, never solved.
+/// Marker in every block message, so callers can tell "blocked" from "not found".
+pub const BLOCKED: &str = "bloqueado (verificación anti-bot), no se evade";
+
+/// Bot challenges are reported as blocks, never solved: Mercado Libre's account check, Akamai's
+/// bm-verify interstitial, Amazon's captcha page and AliExpress's "punish" slider.
 fn is_challenge(store: &str, body: &str) -> bool {
-    ["account-verification", "triggerInterstitialChallenge", "bm-verify="].iter().any(|m| body.contains(m))
-        || (store == "amazon" && body.contains("captcha"))
+    const MARKERS: [&str; 6] =
+        ["account-verification", "triggerinterstitialchallenge", "bm-verify=", "validatecaptcha", "/punish", "x5sec"];
+    let lower = body.to_ascii_lowercase();
+    MARKERS.iter().any(|m| lower.contains(m)) || (store == "amazon" && lower.contains("captcha"))
 }
 
 fn encode(s: &str) -> String {
@@ -403,6 +424,8 @@ mod tests {
     fn challenge_pages_are_blocks() {
         assert!(is_challenge("amazon", "<script>function triggerInterstitialChallenge() {}</script>"));
         assert!(is_challenge("falabella", "https://x/account-verification?go"));
+        assert!(is_challenge("amazon", r#"<form action="/errors_page/validateCaptcha">"#));
+        assert!(is_challenge("aliexpress", r#"<script src="/_____tmd_____/punish?x5secdata=1">"#));
         assert!(!is_challenge("falabella", "<h2 aria-label=\"FiiO JT3\">"));
     }
 
