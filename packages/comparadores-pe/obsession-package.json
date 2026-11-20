@@ -1,0 +1,10 @@
+{
+  "name": "comparadores-pe",
+  "version": "0.1.0",
+  "description": "Comparadores de precios peruanos: Knasta (muchas tiendas en una búsqueda).",
+  "source": "builtin",
+  "experts": ["experts/knasta.md"],
+  "mcp_servers": {
+    "knasta": {"command": "self", "args": ["mcp", "knasta"]}
+  }
+}

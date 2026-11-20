@@ -16,8 +16,10 @@ pub struct Listing {
     pub sold: Option<String>,
 }
 
-pub const STORES: [&str; 10] =
-    ["amazon", "aliexpress", "falabella", "plazavea", "oechsle", "promart", "coolbox", "estilos", "wong", "metro"];
+pub const STORES: [&str; 12] = [
+    "amazon", "aliexpress", "falabella", "plazavea", "oechsle", "promart", "coolbox", "estilos", "wong", "metro",
+    "ripley", "knasta",
+];
 
 /// Peruvian stores on VTEX: same public catalog API, so one parser serves all of them.
 const VTEX: [(&str, &str); 7] = [
@@ -32,6 +34,18 @@ const VTEX: [(&str, &str); 7] = [
 
 fn vtex_host(store: &str) -> Option<&'static str> {
     VTEX.iter().find(|(name, _)| *name == store).map(|(_, host)| *host)
+}
+
+/// Stores whose search page embeds schema.org JSON-LD `Product`s with prices: one generic parser.
+/// `{q}` is the query with spaces as %20 (Ripley takes it in the path).
+/// shortcut: templates live in code like VTEX; move them to package manifests when users add their own.
+const JSONLD: [(&str, &str, &str); 2] = [
+    ("ripley", "simple.ripley.com.pe", "https://simple.ripley.com.pe/search/{q}"),
+    ("knasta", "knasta.pe", "https://knasta.pe/results?q={q}"),
+];
+
+fn jsonld_store(store: &str) -> Option<(&'static str, &'static str)> {
+    JSONLD.iter().find(|(name, _, _)| *name == store).map(|(_, host, tpl)| (*host, *tpl))
 }
 
 pub fn client() -> reqwest::blocking::Client {
@@ -52,9 +66,10 @@ pub fn search(client: &reqwest::blocking::Client, store: &str, keyword: &str) ->
         "aliexpress" => format!("https://www.aliexpress.com/w/wholesale-{}.html", q.replace('+', "-")),
         "falabella" => format!("https://www.falabella.com.pe/falabella-pe/search?Ntt={q}"),
         // VTEX rejects "+" for spaces (HTTP 400); it wants %20.
-        _ => match vtex_host(store) {
-            Some(host) => format!("https://{host}/api/catalog_system/pub/products/search?ft={}&_from=0&_to=19", q.replace('+', "%20")),
-            None => return Err(format!("tienda desconocida: {store}")),
+        _ => match (vtex_host(store), jsonld_store(store)) {
+            (Some(host), _) => format!("https://{host}/api/catalog_system/pub/products/search?ft={}&_from=0&_to=19", q.replace('+', "%20")),
+            (None, Some((_, tpl))) => tpl.replace("{q}", &q.replace('+', "%20")),
+            (None, None) => return Err(format!("tienda desconocida: {store}")),
         },
     };
     let body = fetch(client, store, &url)?;
@@ -62,6 +77,7 @@ pub fn search(client: &reqwest::blocking::Client, store: &str, keyword: &str) ->
         "amazon" => parse_amazon(&body),
         "aliexpress" => parse_aliexpress(&body),
         "falabella" => parse_falabella(&body),
+        _ if jsonld_store(store).is_some() => parse_jsonld(store, &body),
         _ => parse_vtex(store, &body),
     };
     Ok(listings.into_iter().filter(|l| l.price_pen > 0.0).collect())
@@ -116,14 +132,17 @@ pub fn open(client: &reqwest::blocking::Client, store: &str, url: &str, title: &
         "amazon" => expected("https://www.amazon.com/"),
         "aliexpress" => expected("https://www.aliexpress.com/item/"),
         "falabella" => expected("https://www.falabella.com.pe/"),
-        _ => vtex_host(store).is_some_and(|host| expected(&format!("https://{host}/"))),
+        _ => vtex_host(store)
+            .or(jsonld_store(store).map(|(host, _)| host))
+            .is_some_and(|host| expected(&format!("https://{host}/"))),
     };
     // Trust boundary: the URL comes from a model; never fetch outside the store's own domain.
     if !allowed {
         return PageCheck::failed(url, "page", format!("URL fuera de {store}"));
     }
     match store {
-        "aliexpress" => recheck_aliexpress(client, url, title),
+        // Ripley's JSON-LD product URLs often 404; the item is re-found by searching instead.
+        "aliexpress" | "ripley" => recheck_by_search(client, store, url, title),
         _ if vtex_host(store).is_some() => {
             // VTEX product pages render prices client-side; its catalog API answers by slug.
             let host = vtex_host(store).unwrap_or_default();
@@ -137,7 +156,7 @@ pub fn open(client: &reqwest::blocking::Client, store: &str, url: &str, title: &
         _ => match fetch(client, store, url) {
             Err(e) => PageCheck::failed(url, "page", e),
             Ok(body) if store == "amazon" => page_amazon(url, &body),
-            Ok(body) => page_falabella(url, &body),
+            Ok(body) => page_jsonld(url, &body),
         },
     }
 }
@@ -172,7 +191,7 @@ fn page_amazon(url: &str, html: &str) -> PageCheck {
     }
 }
 
-fn page_falabella(url: &str, html: &str) -> PageCheck {
+fn page_jsonld(url: &str, html: &str) -> PageCheck {
     static LD: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r#"(?s)<script type="application/ld\+json"[^>]*>(.*?)</script>"#).unwrap());
     static SELLER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""sellerName":"([^"]+)""#).unwrap());
@@ -199,7 +218,11 @@ fn page_falabella(url: &str, html: &str) -> PageCheck {
         title: product["name"].as_str().map(String::from),
         price_pen: best,
         in_stock: Some(offers.iter().any(|o| o["availability"].as_str().is_some_and(|a| a.ends_with("InStock")))),
-        seller: SELLER.captures(html).map(|c| c[1].to_string()),
+        // Falabella names the seller outside the JSON-LD; others put it in offers.seller.
+        seller: SELLER
+            .captures(html)
+            .map(|c| c[1].to_string())
+            .or_else(|| offers.iter().find_map(|o| o["seller"]["name"].as_str().map(String::from))),
         rating: product["aggregateRating"]["ratingValue"].as_f64(),
         reviews: product["aggregateRating"]["reviewCount"].as_u64(),
         method: "page".into(),
@@ -230,16 +253,17 @@ fn page_vtex(url: &str, json: &str) -> PageCheck {
     }
 }
 
-/// shortcut: AliExpress item pages need JavaScript, so this only proves the item is still listed
-/// at that price in a fresh search; it cannot see stock or the store. Use a browser-backed MCP to go deeper.
-fn recheck_aliexpress(client: &reqwest::blocking::Client, url: &str, title: &str) -> PageCheck {
+/// shortcut: for stores whose product page cannot be read (AliExpress needs JavaScript, Ripley's
+/// JSON-LD URLs 404), this only proves the item is still listed at that price in a fresh search;
+/// it cannot see stock or the seller. Use a browser-backed MCP to go deeper.
+fn recheck_by_search(client: &reqwest::blocking::Client, store: &str, url: &str, title: &str) -> PageCheck {
     let method = "search_recheck";
     // Search ranking shifts between calls; a shorter brand+model query often brings the item back.
     let words: Vec<&str> = title.split_whitespace().collect();
     let queries: Vec<String> = [6, 3].iter().map(|&n| words.iter().take(n).copied().collect::<Vec<_>>().join(" ")).collect();
     let mut found = None;
     for query in queries.iter().filter(|q| !q.is_empty()) {
-        match search(client, "aliexpress", query) {
+        match search(client, store, query) {
             Err(e) => return PageCheck::failed(url, method, e),
             Ok(list) => {
                 found = list.into_iter().find(|l| l.url == url);
@@ -366,6 +390,52 @@ fn parse_falabella(html: &str) -> Vec<Listing> {
         .collect()
 }
 
+/// Every schema.org `Product` in the page's JSON-LD, found through `@graph`, `mainEntity`,
+/// `itemListElement` and `item`. Only priced offers in PEN (or unlabeled) and not out of stock count.
+fn parse_jsonld(store: &str, html: &str) -> Vec<Listing> {
+    static LD: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?s)<script[^>]*application/ld\+json[^>]*>(.*?)</script>"#).unwrap());
+    fn products<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+        match v {
+            Value::Array(a) => a.iter().for_each(|x| products(x, out)),
+            Value::Object(o) if o.get("@type").is_some_and(|t| t == "Product") => out.push(v),
+            Value::Object(o) => ["@graph", "mainEntity", "itemListElement", "item"]
+                .iter()
+                .filter_map(|k| o.get(*k))
+                .for_each(|x| products(x, out)),
+            _ => {}
+        }
+    }
+    let docs: Vec<Value> = LD.captures_iter(html).filter_map(|c| serde_json::from_str(&c[1]).ok()).collect();
+    let mut found = Vec::new();
+    docs.iter().for_each(|d| products(d, &mut found));
+    let num = |v: &Value| v.as_f64().or_else(|| v.as_str().map(parse_price)).filter(|p| *p > 0.0);
+    found
+        .into_iter()
+        .filter_map(|p| {
+            let offer = match &p["offers"] {
+                Value::Array(a) => a.first()?,
+                o => o,
+            };
+            let currency = offer["priceCurrency"].as_str().unwrap_or("PEN");
+            let out_of_stock = offer["availability"].as_str().is_some_and(|a| a.ends_with("OutOfStock"));
+            if currency != "PEN" || out_of_stock {
+                return None;
+            }
+            Some(Listing {
+                store: store.into(),
+                title: p["name"].as_str()?.trim().to_string(),
+                // AggregateOffer carries lowPrice instead of price.
+                price_pen: num(&offer["price"]).or_else(|| num(&offer["lowPrice"]))?,
+                url: p["url"].as_str().or(offer["url"].as_str()).filter(|u| u.starts_with("https://"))?.to_string(),
+                seller: offer["seller"]["name"].as_str().map(String::from),
+                rating: num(&p["aggregateRating"]["ratingValue"]),
+                sold: None,
+            })
+        })
+        .collect()
+}
+
 fn parse_vtex(store: &str, json: &str) -> Vec<Listing> {
     let Ok(Value::Array(items)) = serde_json::from_str(json) else { return vec![] };
     items
@@ -430,7 +500,7 @@ mod tests {
         let fal = r#"<script type="application/ld+json">{"@type":"Product","name":"ATH M40X","offers":[
             {"price":"510","availability":"https://schema.org/InStock"},{"price":"619","availability":"https://schema.org/InStock"}]}</script>
             "sellerName":"Live Music""#;
-        let c = page_falabella("u", fal);
+        let c = page_jsonld("u", fal);
         assert_eq!((c.price_pen, c.in_stock, c.seller.as_deref()), (Some(510.0), Some(true), Some("Live Music")));
 
         let pv = r#"[{"productName":"Space One","items":[{"sellers":[{"sellerName":"SanyPeru","commertialOffer":{"Price":399.0,"AvailableQuantity":0}}]}]}]"#;
@@ -454,10 +524,30 @@ mod tests {
             "items":[{"sellers":[{"sellerName":"oechsle","commertialOffer":{"Price":49.9,"AvailableQuantity":3}}]}]}]"#;
         let l = &parse_vtex("oechsle", json)[0];
         assert_eq!((l.store.as_str(), l.price_pen, l.seller.as_deref()), ("oechsle", 49.9, Some("oechsle")));
-        assert!(STORES.iter().all(|s| ["amazon", "aliexpress", "falabella"].contains(s) || vtex_host(s).is_some()));
+        assert!(STORES.iter().all(|s| ["amazon", "aliexpress", "falabella"].contains(s) || vtex_host(s).is_some() || jsonld_store(s).is_some()));
         // A VTEX store may not open URLs of another VTEX store.
         let c = open(&client(), "oechsle", "https://www.plazavea.com.pe/x/p", "");
         assert!(!c.ok && c.note.contains("fuera"));
+    }
+
+    #[test]
+    fn reads_jsonld_products() {
+        let html = r#"<script type="application/ld+json">{"@type":"ItemList","itemListElement":[
+            {"@type":"ListItem","item":{"@type":"Product","name":"AUDÍFONOS AIWA AW-K56","url":"https://simple.ripley.com.pe/a/1",
+              "offers":{"@type":"Offer","priceCurrency":"PEN","price":"69","availability":"https://schema.org/InStock"}}},
+            {"@type":"ListItem","item":{"@type":"Product","name":"Agotado","url":"https://simple.ripley.com.pe/a/2",
+              "offers":{"priceCurrency":"PEN","price":"10","availability":"https://schema.org/OutOfStock"}}},
+            {"@type":"ListItem","item":{"@type":"Product","name":"En dólares","url":"https://x/3","offers":{"priceCurrency":"USD","price":"5"}}}]}</script>
+            <script type="application/ld+json">{"@graph":[{"@type":"Product","name":"Sony WH-1000XM5",
+              "offers":{"url":"https://knasta.pe/detail/shopstar/1/x","lowPrice":729,"seller":{"name":"Shopstar"}},
+              "aggregateRating":{"ratingValue":"4.7"}}]}</script>"#;
+        let l = parse_jsonld("ripley", html);
+        assert_eq!(l.len(), 2, "out-of-stock and non-PEN offers are dropped");
+        assert_eq!((l[0].title.as_str(), l[0].price_pen), ("AUDÍFONOS AIWA AW-K56", 69.0));
+        assert_eq!((l[1].price_pen, l[1].seller.as_deref(), l[1].rating), (729.0, Some("Shopstar"), Some(4.7)));
+        assert_eq!(l[1].url, "https://knasta.pe/detail/shopstar/1/x");
+        let c = open(&client(), "knasta", "https://simple.ripley.com.pe/a/1", "");
+        assert!(!c.ok && c.note.contains("fuera"), "each JSON-LD store only opens its own host");
     }
 
     #[test]

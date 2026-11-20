@@ -1,7 +1,7 @@
 {
   "name": "tiendas-pe",
   "version": "0.1.0",
-  "description": "Tiendas peruanas con entrega local: Falabella, Plaza Vea y otras tiendas VTEX (Oechsle, Coolbox, Estilos, Promart).",
+  "description": "Tiendas peruanas con entrega local: Falabella, Ripley, Plaza Vea y otras tiendas VTEX (Oechsle, Coolbox, Estilos, Promart).",
   "source": "builtin",
   "experts": [
     "experts/falabella.md",
@@ -9,7 +9,8 @@
     "experts/oechsle.md",
     "experts/coolbox.md",
     "experts/estilos.md",
-    "experts/promart.md"
+    "experts/promart.md",
+    "experts/ripley.md"
   ],
   "mcp_servers": {
     "falabella": {
@@ -52,6 +53,13 @@
       "args": [
         "mcp",
         "promart"
+      ]
+    },
+    "ripley": {
+      "command": "self",
+      "args": [
+        "mcp",
+        "ripley"
       ]
     }
   }

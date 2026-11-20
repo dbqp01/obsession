@@ -7,7 +7,7 @@ Obsession es un harness propio para tomar decisiones de compra. Su diferenciador
 | Pieza | Evidencia |
 |---|---|
 | Búsqueda con expertos agentes, recomprobación de páginas, verificador de otra familia de modelo y ranker con rondas | `obsession eval` (10 casos): 10/10 sin error, 9/10 en menos de 5 min, 1 pick falso de 47, ~180 mil tokens por caso |
-| 10 tiendas: Falabella y 7 VTEX (Plaza Vea, Oechsle, Promart, Coolbox, Estilos, Wong, Metro) más Amazon y AliExpress | Las VTEX responden en vivo; Amazon y AliExpress bloquean con anti-bot y se reportan como bloqueo, no se evaden |
+| 12 fuentes: Falabella, Ripley, 7 VTEX (Plaza Vea, Oechsle, Promart, Coolbox, Estilos, Wong, Metro), el comparador Knasta (muchas tiendas peruanas en una búsqueda), Amazon y AliExpress | Las VTEX responden en vivo; Amazon y AliExpress bloquean con anti-bot y se reportan como bloqueo, no se evaden |
 | Paquetes de expertos (`packages/`, `obsession install`) con requisitos y sesiones | Tests de validación (rutas, nombres), merge con choques y desinstalación |
 | Conexiones (Temu vía AnyWeb con tu sesión) | Obsession no ve contraseñas; solo comprueba el perfil del navegador |
 | BYOK (`byok:<proveedor>/<modelo>`, claves con DPAPI) y tope de tokens por corrida | Tests de cifrado, ruteo y URLs; no se probó con un proveedor real |
@@ -24,6 +24,8 @@ Obsession es un harness propio para tomar decisiones de compra. Su diferenciador
 
 ## Límites conocidos
 
+- Fuentes con JSON-LD (Ripley, Knasta) usan un solo parser genérico; sumar otra es una línea si su página de búsqueda trae `Product` con precio. Se evaluaron Crawl4AI, Firecrawl, Playwright MCP, browser-use y APIs como SerpApi (no cubre Perú): ninguno supera a este enfoque para tiendas peruanas, y se excluyeron las herramientas de evasión anti-bot.
+
 - Temu y AliExpress no se vuelven fiables con un modelo más inteligente: bloquean el acceso sin navegador. Las vías son tu sesión (Temu) o la API de afiliados (AliExpress).
 - AliExpress se recomprueba buscando de nuevo, no abriendo la página, porque la página necesita JavaScript. Su precio cambia entre búsquedas, y eso explica el único pick falso.
 - Negociación: el tono promedia 3.25/5 (el agente repite frases) y queda 1 falsa alarma causada por el vendedor simulado. Nada se probó con vendedores reales.
@@ -31,7 +33,7 @@ Obsession es un harness propio para tomar decisiones de compra. Su diferenciador
 
 ## Siguientes pasos, en orden
 
-1. **AnyWeb compila Hiraoka y Ripley** (HTML limpio, sin anti-bot) en modo HTTP; los empaquetas con `{package}` y entran como expertos. Es la primera prueba completa de la fábrica de MCPs.
+1. **Aprobar Hiraoka en AnyWeb** (`anyweb/README.md`): ya pasó `propose`; tras tu `review` y `package` entra como paquete con `{package}`. Es la primera prueba completa de la fábrica de MCPs. Ripley ya no la necesita: entra por su JSON-LD con un GET normal.
 2. **Conector de AliExpress por API oficial**, cuando tengas la clave.
 3. **Panel de negociación en la app** (paso 4 del diseño) y tono menos repetitivo.
 4. **Un segundo dominio** (elegir stack de software), para demostrar que el harness es general.

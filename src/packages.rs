@@ -355,7 +355,7 @@ mod tests {
         assert!(l.warnings.is_empty(), "{:?}", l.warnings);
         let mut names: Vec<&str> = l.packages.iter().flat_map(|p| &p.experts).map(|e| e.name.as_str()).collect();
         names.sort();
-        assert_eq!(names, ["aliexpress", "amazon", "coolbox", "estilos", "falabella", "oechsle", "plazavea", "promart", "temu"]);
+        assert_eq!(names, ["aliexpress", "amazon", "coolbox", "estilos", "falabella", "knasta", "oechsle", "plazavea", "promart", "ripley", "temu"]);
         let skills: Vec<&str> = l.packages.iter().flat_map(|p| &p.skills).map(|s| s.name.as_str()).collect();
         for e in l.packages.iter().flat_map(|p| &p.experts) {
             assert!(e.skills.iter().all(|s| skills.contains(&s.as_str())), "{} pide una skill que no existe", e.name);
