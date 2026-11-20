@@ -16,7 +16,23 @@ pub struct Listing {
     pub sold: Option<String>,
 }
 
-pub const STORES: [&str; 4] = ["amazon", "aliexpress", "falabella", "plazavea"];
+pub const STORES: [&str; 10] =
+    ["amazon", "aliexpress", "falabella", "plazavea", "oechsle", "promart", "coolbox", "estilos", "wong", "metro"];
+
+/// Peruvian stores on VTEX: same public catalog API, so one parser serves all of them.
+const VTEX: [(&str, &str); 7] = [
+    ("plazavea", "www.plazavea.com.pe"),
+    ("oechsle", "www.oechsle.pe"),
+    ("promart", "www.promart.pe"),
+    ("coolbox", "www.coolbox.pe"),
+    ("estilos", "www.estilos.com.pe"),
+    ("wong", "www.wong.pe"),
+    ("metro", "www.metro.pe"),
+];
+
+fn vtex_host(store: &str) -> Option<&'static str> {
+    VTEX.iter().find(|(name, _)| *name == store).map(|(_, host)| *host)
+}
 
 pub fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
@@ -35,15 +51,18 @@ pub fn search(client: &reqwest::blocking::Client, store: &str, keyword: &str) ->
         "amazon" => format!("https://www.amazon.com/s?k={q}"),
         "aliexpress" => format!("https://www.aliexpress.com/w/wholesale-{}.html", q.replace('+', "-")),
         "falabella" => format!("https://www.falabella.com.pe/falabella-pe/search?Ntt={q}"),
-        "plazavea" => format!("https://www.plazavea.com.pe/api/catalog_system/pub/products/search?ft={}&_from=0&_to=19", q.replace('+', "%20")),
-        _ => return Err(format!("tienda desconocida: {store}")),
+        // VTEX rejects "+" for spaces (HTTP 400); it wants %20.
+        _ => match vtex_host(store) {
+            Some(host) => format!("https://{host}/api/catalog_system/pub/products/search?ft={}&_from=0&_to=19", q.replace('+', "%20")),
+            None => return Err(format!("tienda desconocida: {store}")),
+        },
     };
     let body = fetch(client, store, &url)?;
     let listings = match store {
         "amazon" => parse_amazon(&body),
         "aliexpress" => parse_aliexpress(&body),
         "falabella" => parse_falabella(&body),
-        _ => parse_plazavea(&body),
+        _ => parse_vtex(store, &body),
     };
     Ok(listings.into_iter().filter(|l| l.price_pen > 0.0).collect())
 }
@@ -97,8 +116,7 @@ pub fn open(client: &reqwest::blocking::Client, store: &str, url: &str, title: &
         "amazon" => expected("https://www.amazon.com/"),
         "aliexpress" => expected("https://www.aliexpress.com/item/"),
         "falabella" => expected("https://www.falabella.com.pe/"),
-        "plazavea" => expected("https://www.plazavea.com.pe/"),
-        _ => false,
+        _ => vtex_host(store).is_some_and(|host| expected(&format!("https://{host}/"))),
     };
     // Trust boundary: the URL comes from a model; never fetch outside the store's own domain.
     if !allowed {
@@ -106,13 +124,14 @@ pub fn open(client: &reqwest::blocking::Client, store: &str, url: &str, title: &
     }
     match store {
         "aliexpress" => recheck_aliexpress(client, url, title),
-        "plazavea" => {
+        _ if vtex_host(store).is_some() => {
             // VTEX product pages render prices client-side; its catalog API answers by slug.
+            let host = vtex_host(store).unwrap_or_default();
             let slug = url.trim_end_matches("/p").rsplit('/').next().unwrap_or("");
-            let api = format!("https://www.plazavea.com.pe/api/catalog_system/pub/products/search/{slug}/p");
+            let api = format!("https://{host}/api/catalog_system/pub/products/search/{slug}/p");
             match fetch(client, store, &api) {
                 Err(e) => PageCheck::failed(url, "page", e),
-                Ok(body) => page_plazavea(url, &body),
+                Ok(body) => page_vtex(url, &body),
             }
         }
         _ => match fetch(client, store, url) {
@@ -188,7 +207,7 @@ fn page_falabella(url: &str, html: &str) -> PageCheck {
     }
 }
 
-fn page_plazavea(url: &str, json: &str) -> PageCheck {
+fn page_vtex(url: &str, json: &str) -> PageCheck {
     let Ok(Value::Array(items)) = serde_json::from_str(json) else {
         return PageCheck::failed(url, "page", "respuesta inesperada del catálogo".into());
     };
@@ -347,7 +366,7 @@ fn parse_falabella(html: &str) -> Vec<Listing> {
         .collect()
 }
 
-fn parse_plazavea(json: &str) -> Vec<Listing> {
+fn parse_vtex(store: &str, json: &str) -> Vec<Listing> {
     let Ok(Value::Array(items)) = serde_json::from_str(json) else { return vec![] };
     items
         .iter()
@@ -358,7 +377,7 @@ fn parse_plazavea(json: &str) -> Vec<Listing> {
                 return None;
             }
             Some(Listing {
-                store: "plazavea".into(),
+                store: store.into(),
                 title: x["productName"].as_str()?.to_string(),
                 price_pen: offer["Price"].as_f64()?,
                 url: x["link"].as_str()?.to_string(),
@@ -415,9 +434,9 @@ mod tests {
         assert_eq!((c.price_pen, c.in_stock, c.seller.as_deref()), (Some(510.0), Some(true), Some("Live Music")));
 
         let pv = r#"[{"productName":"Space One","items":[{"sellers":[{"sellerName":"SanyPeru","commertialOffer":{"Price":399.0,"AvailableQuantity":0}}]}]}]"#;
-        let c = page_plazavea("u", pv);
+        let c = page_vtex("u", pv);
         assert_eq!((c.price_pen, c.in_stock), (Some(399.0), Some(false)));
-        assert!(!page_plazavea("u", "[]").ok);
+        assert!(!page_vtex("u", "[]").ok);
     }
 
     #[test]
@@ -427,6 +446,18 @@ mod tests {
         assert!(is_challenge("amazon", r#"<form action="/errors_page/validateCaptcha">"#));
         assert!(is_challenge("aliexpress", r#"<script src="/_____tmd_____/punish?x5secdata=1">"#));
         assert!(!is_challenge("falabella", "<h2 aria-label=\"FiiO JT3\">"));
+    }
+
+    #[test]
+    fn vtex_stores_share_one_parser() {
+        let json = r#"[{"productName":"KZ EDX Pro","link":"https://www.oechsle.pe/kz-edx-pro/p",
+            "items":[{"sellers":[{"sellerName":"oechsle","commertialOffer":{"Price":49.9,"AvailableQuantity":3}}]}]}]"#;
+        let l = &parse_vtex("oechsle", json)[0];
+        assert_eq!((l.store.as_str(), l.price_pen, l.seller.as_deref()), ("oechsle", 49.9, Some("oechsle")));
+        assert!(STORES.iter().all(|s| ["amazon", "aliexpress", "falabella"].contains(s) || vtex_host(s).is_some()));
+        // A VTEX store may not open URLs of another VTEX store.
+        let c = open(&client(), "oechsle", "https://www.plazavea.com.pe/x/p", "");
+        assert!(!c.ok && c.note.contains("fuera"));
     }
 
     #[test]
