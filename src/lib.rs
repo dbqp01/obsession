@@ -6,6 +6,7 @@ pub mod db;
 pub mod eval;
 pub mod llm;
 pub mod mcp;
+pub mod packages;
 pub mod stores;
 
 use agent::{Expert, Store};
@@ -42,25 +43,30 @@ fn pick<'a>(experts: &'a [Expert], names: &Value) -> Vec<&'a Expert> {
     if chosen.is_empty() { experts.iter().collect() } else { chosen }
 }
 
+/// The MCP servers of every installed package, as `{"servers": {...}}`.
 pub fn load_registry(root: &Path) -> Result<Value, Box<dyn std::error::Error>> {
-    let path = root.join("mcp.json");
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?)
+    Ok(packages::load(root).registry)
 }
 
 /// Runs one purchase search end to end and returns the report the UI shows.
-/// `root` holds `experts/`, `skills/`, `mcp.json` and receives `obsession.db` and `runs/`.
+/// `root` holds the builtin `packages/` and receives `obsession.db` and `runs/`.
 pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::error::Error>> {
     let started = Instant::now();
     let main_model = main_model();
     // A different model family on purpose: the verifier should not share the finders' blind spots.
     let verifier_model = model("OBSESSION_VERIFIER", "commandcode-plan/z-ai/glm-5.3-flash");
-    let registry = load_registry(root)?;
-    let skills = agent::load_skills(&root.join("skills").to_string_lossy())?;
+    let loaded = packages::load(root);
+    for w in &loaded.warnings {
+        emit(json!({"kind": "warning", "text": w}));
+    }
+    let registry = loaded.registry;
+    let (ready, skills, left_out) = packages::ready(loaded.packages, &registry);
+    for w in left_out {
+        emit(json!({"kind": "warning", "text": w}));
+    }
     // An expert whose platform has no session would only burn steps on LOGIN_REQUIRED.
-    let (experts, offline): (Vec<Expert>, Vec<Expert>) = agent::load_experts(&root.join("experts").to_string_lossy())?
-        .into_iter()
-        .partition(|e| e.mcp.iter().all(|m| connections::usable(&registry, m)));
+    let (experts, offline): (Vec<Expert>, Vec<Expert>) =
+        ready.into_iter().partition(|e| e.mcp.iter().all(|m| connections::usable(&registry, m)));
     for e in &offline {
         emit(json!({"kind": "warning", "text": format!("{} no participa: falta iniciar sesión en Conexiones", e.name)}));
     }

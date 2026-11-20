@@ -1,0 +1,11 @@
+{
+  "name": "tiendas-pe",
+  "version": "0.1.0",
+  "description": "Tiendas peruanas con entrega local: Falabella y Plaza Vea.",
+  "source": "builtin",
+  "experts": ["experts/falabella.md", "experts/plazavea.md"],
+  "mcp_servers": {
+    "falabella": {"command": "self", "args": ["mcp", "falabella"]},
+    "plazavea": {"command": "self", "args": ["mcp", "plazavea"]}
+  }
+}

@@ -1,4 +1,4 @@
-//! Experts are agents defined in `experts/*.md`; skills are standard `skills/*/SKILL.md`.
+//! Experts are agents defined in `.md` files; skills are standard `SKILL.md` dirs. Both ship in packages.
 //! Only the orchestrator invokes an expert, and only the expert sees its own MCP tools.
 use crate::{Emit, llm, mcp, stores::Listing};
 use serde_json::{Value, json};
@@ -48,44 +48,28 @@ fn read_md(path: &std::path::Path) -> Result<(HashMap<String, String>, String), 
     frontmatter(&text).ok_or(format!("{}: falta el frontmatter ---", path.display()))
 }
 
-pub fn load_experts(dir: &str) -> Result<Vec<Expert>, String> {
-    let mut experts = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| format!("{dir}: {e}"))? {
-        let path = entry.map_err(|e| e.to_string())?.path();
-        if path.extension().is_none_or(|e| e != "md") {
-            continue;
-        }
-        let (f, body) = read_md(&path)?;
-        let need = |k: &str| f.get(k).cloned().ok_or(format!("{}: falta `{k}`", path.display()));
-        experts.push(Expert {
-            name: need("name")?,
-            description: need("description")?,
-            model: need("model")?,
-            mcp: list(f.get("mcp")),
-            skills: list(f.get("skills")),
-            max_steps: f.get("max_steps").and_then(|s| s.parse().ok()).unwrap_or(6).max(2),
-            body,
-        });
-    }
-    experts.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(experts)
+pub fn load_expert(path: &std::path::Path) -> Result<Expert, String> {
+    let (f, body) = read_md(path)?;
+    let need = |k: &str| f.get(k).cloned().ok_or(format!("{}: falta `{k}`", path.display()));
+    Ok(Expert {
+        name: need("name")?,
+        description: need("description")?,
+        model: need("model")?,
+        mcp: list(f.get("mcp")),
+        skills: list(f.get("skills")),
+        max_steps: f.get("max_steps").and_then(|s| s.parse().ok()).unwrap_or(6).max(2),
+        body,
+    })
 }
 
-pub fn load_skills(dir: &str) -> Result<Vec<Skill>, String> {
-    let mut skills = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(skills) };
-    for entry in entries {
-        let path = entry.map_err(|e| e.to_string())?.path().join("SKILL.md");
-        if !path.exists() {
-            continue;
-        }
-        let (f, body) = read_md(&path)?;
-        let (Some(name), Some(description)) = (f.get("name"), f.get("description")) else {
-            return Err(format!("{}: falta name o description", path.display()));
-        };
-        skills.push(Skill { name: name.clone(), description: description.clone(), body });
-    }
-    Ok(skills)
+/// A skill directory holding a standard `SKILL.md`.
+pub fn load_skill(dir: &std::path::Path) -> Result<Skill, String> {
+    let path = dir.join("SKILL.md");
+    let (f, body) = read_md(&path)?;
+    let (Some(name), Some(description)) = (f.get("name"), f.get("description")) else {
+        return Err(format!("{}: falta name o description", path.display()));
+    };
+    Ok(Skill { name: name.clone(), description: description.clone(), body })
 }
 
 /// Every listing any expert saw this run, addressed by a stable id. Tool results go here
@@ -170,7 +154,7 @@ pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill
     let mut tools = Vec::new();
     for server in &expert.mcp {
         let Some(cfg) = registry["servers"].get(server) else {
-            note(format!("MCP «{server}» no está en mcp.json"));
+            note(format!("MCP «{server}» no está en ningún paquete instalado"));
             continue;
         };
         match mcp::Client::from_config(cfg).and_then(|mut c| c.list_tools().map(|t| (c, t))) {
@@ -338,17 +322,5 @@ mod tests {
         assert_eq!(store.add(vec![l("a"), l("b"), l("a")]), [0, 1, 0]);
         let ids = store.add((0..25).map(|i| l(&i.to_string())).collect());
         assert!(store.table(&ids).ends_with("(5 resultados más omitidos; afina la búsqueda)"));
-    }
-
-    #[test]
-    fn repo_experts_and_skills_load() {
-        let skills = load_skills(concat!(env!("CARGO_MANIFEST_DIR"), "/skills")).unwrap();
-        let experts = load_experts(concat!(env!("CARGO_MANIFEST_DIR"), "/experts")).unwrap();
-        assert!(!experts.is_empty());
-        for e in &experts {
-            for s in &e.skills {
-                assert!(skills.iter().any(|k| &k.name == s), "{} pide la skill {s}, que no existe", e.name);
-            }
-        }
     }
 }
