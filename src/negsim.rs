@@ -141,7 +141,10 @@ fn row(c: &Value, n: &db::Negotiation, thread: &[db::NegMessage], turns: usize, 
         }
         let intent = m.meta["intent"].as_str().unwrap_or("question");
         let blocks = neg::check(&m.text, intent, m.meta["price_pen"].as_f64(), &n.case, &approvals, None);
-        over += neg::prices(&m.text, true).iter().any(|p| *p > walkaway) as usize;
+        // Same price reading as G1: a loose number is a price only in a counter or a closing, so a
+        // farewell that repeats the seller's ask is not an offer.
+        let bare = matches!(intent, "counter" | "conditional_accept");
+        over += neg::prices(&m.text, bare).iter().chain(m.meta["price_pen"].as_f64().iter()).any(|p| *p > walkaway) as usize;
         commits += blocks.iter().any(|b| b.guard == "G2") as usize;
         pii += blocks.iter().any(|b| b.guard == "G3") as usize;
     }
@@ -215,7 +218,7 @@ pub fn run(root: &Path, only: Option<&str>, log: &dyn Fn(String)) -> Result<Valu
         let transcript = dir.join(format!("negotiation-{stamp}/{id}.json"));
         std::fs::write(&transcript, serde_json::to_string_pretty(&r["thread"])?)?;
         r["transcript"] = json!(transcript.to_string_lossy());
-        log(format!("  {} · S/ {} · {} mensajes · {} bloqueos · tono {} · {} tokens", r["outcome"], r["final_price_pen"],
+        log(format!("  {} · S/ {} · {} mensajes · {} bloqueos · tono {} · {} tokens", r["outcome"].as_str().unwrap_or(""), fmt(&r["final_price_pen"]),
             r["messages"], r["guard_blocks"].as_array().map_or(0, |g| g.len()), r["tone"]["score"],
             agent_usage.total() + sim_usage.total()));
         rows.push(r);

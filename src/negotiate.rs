@@ -683,6 +683,8 @@ mod tests {
         assert_eq!(guards("te ofrezco mil soles", "question", &[]), ["G1"]);
         assert!(check("ok", "counter", Some(985.0), &case(), &[], None).iter().any(|b| b.guard == "G1"));
         assert_eq!(prices("S/ 1.050 o S/10.50", false), [1050.0, 10.5]);
+        assert!(guards("990 se me pasa del presupuesto, gracias igual", "follow_up", &[]).is_empty(),
+            "repeating the seller's ask outside a counter is not an offer");
     }
 
     #[test]
