@@ -28,6 +28,21 @@ Los expertos de una tienda sin sesión no participan en la búsqueda, y la app a
 
 Límite: Chrome permite un solo proceso por perfil. Si otro programa ya tiene abierto el MCP de Temu (por ejemplo, un cliente MCP con `anyweb-temu` registrado), el experto de Temu falla con `INTERNAL_ERROR` hasta que ese programa lo cierre.
 
+## Tus propias claves (BYOK)
+
+Sin magpie, puedes usar cualquier proveedor compatible con OpenAI (OpenAI, DeepSeek, Moonshot, Zhipu, OpenRouter, o Anthropic por un endpoint compatible):
+
+```
+obsession provider add openrouter https://openrouter.ai/api/v1
+obsession key set openrouter        # lee la clave de stdin, nunca de los argumentos
+obsession provider list             # nombre, URL y si hay clave (nunca la clave)
+obsession key remove openrouter
+```
+
+Un modelo escrito `byok:<proveedor>/<modelo>` (por ejemplo `byok:openrouter/deepseek/deepseek-chat`) va a ese proveedor; cualquier otro id sigue yendo a magpie como hoy. Úsalo en el `model:` de un experto o en `OBSESSION_MAIN` / `OBSESSION_VERIFIER`.
+
+Los proveedores se guardan sin secretos en `%LOCALAPPDATA%\Obsession\providers.json`. Cada clave va cifrada con DPAPI (solo tu usuario de Windows la descifra) en `%LOCALAPPDATA%\Obsession\keys\<proveedor>.key`. La URL debe ser https; http solo para localhost. Fuera de Windows no se guardan claves: usa `OBSESSION_KEY_<PROVEEDOR>`.
+
 ## Eval
 
 `obsession eval` corre las consultas de `eval/cases.json`. A cada pick lo vuelve a abrir en su página y lo marca como falso si no abre, si el precio se movió más de 5 % o si es un accesorio. También pide la respuesta a un modelo sin tools, para comparar. El resultado queda en `eval/results/<fecha>.md`, una tabla lado a lado donde tú marcas, caso por caso, si Obsession eligió mejor, igual o peor.
@@ -62,5 +77,6 @@ Cada experto decide sus propias búsquedas, solo ve sus propios MCP y debe termi
 
 - Tiendas: Amazon, AliExpress, Falabella y Plaza Vea. Mercado Libre y Temu bloquean con anti-bot, y no se evade.
 - Los modelos van por el router magpie (`MAGPIE_URL`, por defecto `http://127.0.0.1:3425/v1`). Cada experto define su modelo en el frontmatter. `OBSESSION_MAIN` y `OBSESSION_VERIFIER` cambian el planificador y el verificador.
+- Cada corrida tiene un tope de tokens (`OBSESSION_MAX_TOKENS`, por defecto 400000). Al agotarse, los expertos entregan `submit` con lo que tienen y no se hace la ronda 2. El reporte final y `eval` muestran los tokens usados.
 - Para agregar un MCP externo: añade una entrada en `mcp.json` y nómbrala en el `mcp:` de un experto. Si devuelve listings con la forma `store, title, price_pen, url, seller, rating, sold`, entra al store. Si devuelve otra cosa, el texto se trunca.
 - `prompts/` y `prompts/expert_harness.md` se compilan dentro del binario: después de editarlos hay que recompilar. `experts/` y `skills/` se leen al ejecutar.

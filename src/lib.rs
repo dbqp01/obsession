@@ -6,6 +6,7 @@ pub mod db;
 pub mod eval;
 pub mod llm;
 pub mod mcp;
+pub mod providers;
 pub mod stores;
 
 use agent::{Expert, Store};
@@ -52,6 +53,7 @@ pub fn load_registry(root: &Path) -> Result<Value, Box<dyn std::error::Error>> {
 /// `root` holds `experts/`, `skills/`, `mcp.json` and receives `obsession.db` and `runs/`.
 pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::error::Error>> {
     let started = Instant::now();
+    let usage = llm::Usage::from_env();
     let main_model = main_model();
     // A different model family on purpose: the verifier should not share the finders' blind spots.
     let verifier_model = model("OBSESSION_VERIFIER", "commandcode-plan/z-ai/glm-5.3-flash");
@@ -68,7 +70,7 @@ pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::e
     let menu: Vec<Value> = experts.iter().map(|e| json!({"name": e.name, "description": e.description})).collect();
 
     emit(json!({"kind": "phase", "phase": "plan", "text": "Estudiando el producto y la necesidad"}));
-    let dossier = llm::chat_json(&main_model, PLANNER, &json!({"query": query, "experts": menu}).to_string())?;
+    let dossier = llm::chat_json(&main_model, PLANNER, &json!({"query": query, "experts": menu}).to_string(), &usage)?;
     emit(json!({"kind": "plan", "dossier": dossier}));
     let mut chosen = pick(&experts, &dossier["experts"]);
 
@@ -95,9 +97,9 @@ pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::e
             let handles: Vec<_> = chosen
                 .iter()
                 .map(|e| {
-                    let (task, registry, skills, store) = (&task, &registry, &skills, &store);
+                    let (task, registry, skills, store, usage) = (&task, &registry, &skills, &store, &usage);
                     s.spawn(move || {
-                        let sub = agent::run_expert(e, task, registry, skills, store, emit);
+                        let sub = agent::run_expert(e, task, registry, skills, store, usage, emit);
                         emit(json!({"kind": "expert_done", "expert": e.name, "steps": sub["steps"],
                             "picks": sub["picks"].as_array().map_or(0, |p| p.len()), "missing": sub["missing"]}));
                         (e.name.clone(), sub)
@@ -159,7 +161,7 @@ pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::e
             let sent: HashSet<u64> = items.iter().filter_map(|v| v["id"].as_u64()).collect();
             // A verdict for an id we did not send would "verify" a listing nobody checked.
             verdicts.extend(
-                verify(&verifier_model, &main_model, &dossier, &items, emit)
+                verify(&verifier_model, &main_model, &dossier, &items, &usage, emit)
                     .into_iter()
                     .filter(|v| v["id"].as_u64().is_some_and(|id| sent.contains(&id))),
             );
@@ -172,7 +174,7 @@ pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::e
         emit(json!({"kind": "phase", "phase": "rank", "text": "Decidiendo la mejor compra"}));
         let input = json!({"query": query, "dossier": dossier, "verified_listings": verified, "rejected": rejected,
             "expert_reports": reports, "experts": menu, "round": round, "max_rounds": MAX_ROUNDS});
-        match llm::chat_json(&main_model, RANKER, &input.to_string()) {
+        match llm::chat_json(&main_model, RANKER, &input.to_string(), &usage) {
             Ok(r) => ranking = r,
             // Keep the previous round's decision rather than lose the whole run.
             Err(e) if round > 1 => {
@@ -186,6 +188,11 @@ pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::e
             picks.retain(|p| p["id"].as_u64().is_some_and(|id| relevant.contains(&id)));
         }
         if ranking["satisfied"].as_bool() != Some(false) || round == MAX_ROUNDS {
+            break;
+        }
+        if usage.spent() {
+            emit(json!({"kind": "warning", "text": format!(
+                "presupuesto de tokens agotado ({} de {}): no se hace la ronda {}", usage.total(), usage.max(), round + 1)}));
             break;
         }
         hint = ranking["next_round"]["hint"].as_str().unwrap_or("").to_string();
@@ -223,7 +230,7 @@ pub fn run(root: &Path, query: &str, emit: Emit) -> Result<Value, Box<dyn std::e
         "run_id": run_id, "query": query, "dossier": dossier, "rounds": rounds,
         "verdict": ranking["verdict"], "satisfied": ranking["satisfied"], "picks": picks, "rejected": rejected,
         "seen": listings.len(), "verified": verified.len(), "elapsed_s": started.elapsed().as_secs(),
-        "csv": csv_path.to_string_lossy(),
+        "csv": csv_path.to_string_lossy(), "tokens": usage.json(),
     });
     db::save_report(&db, run_id, &report)?;
     emit(json!({"kind": "done", "report": report}));
@@ -278,7 +285,7 @@ fn open_pages(registry: &Value, store: &Store, ids: &[u64]) -> HashMap<u64, stor
 }
 
 /// Batches go out in parallel; a batch that fails twice goes to the fallback model, then stays unverified.
-fn verify(model: &str, fallback: &str, dossier: &Value, items: &[Value], emit: Emit) -> Vec<Value> {
+fn verify(model: &str, fallback: &str, dossier: &Value, items: &[Value], usage: &llm::Usage, emit: Emit) -> Vec<Value> {
     let batches: Vec<Value> =
         items.chunks(VERIFY_BATCH).map(|chunk| json!({"dossier": dossier, "listings": chunk})).collect();
     std::thread::scope(|s| {
@@ -286,10 +293,10 @@ fn verify(model: &str, fallback: &str, dossier: &Value, items: &[Value], emit: E
             .iter()
             .map(|input| {
                 s.spawn(move || {
-                    llm::chat_json(model, VERIFIER, &input.to_string()).or_else(|e| {
+                    llm::chat_json(model, VERIFIER, &input.to_string(), usage).or_else(|e| {
                         // Losing the independent model beats leaving the batch unverified.
                         emit(json!({"kind": "warning", "text": format!("{e}; reintento con {fallback}")}));
-                        llm::chat_json(fallback, VERIFIER, &input.to_string())
+                        llm::chat_json(fallback, VERIFIER, &input.to_string(), usage)
                     })
                 })
             })
