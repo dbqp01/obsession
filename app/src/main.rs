@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager};
 /// Only one search at a time: experts share the router and the stores.
 struct Busy(AtomicBool);
 
-/// shortcut: experts/, skills/ and mcp.json are read from the repo this app was built in;
+/// shortcut: builtin packages/ are read from the repo this app was built in;
 /// set OBSESSION_HOME or bundle them as resources before shipping to other machines.
 fn root() -> PathBuf {
     std::env::var_os("OBSESSION_HOME")
@@ -56,7 +56,7 @@ fn disconnect(id: String) -> Result<(), String> {
 }
 
 fn main() {
-    // mcp.json starts store servers as "self": answer them before opening any window.
+    // Packages start store servers as "self": answer them before opening any window.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("mcp") {
         if let Err(e) = obsession::mcp::serve(args.get(1).map(String::as_str).unwrap_or("")) {

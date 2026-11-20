@@ -6,6 +6,7 @@ Busca la mejor compra, no solo el precio más bajo.
 cargo run --release -- "audífonos over-ear para música en casa, hasta 350 soles, Cusco"
 obsession experts   # catálogo de expertos
 obsession skills    # skills del harness
+obsession packages  # paquetes instalados y lo que les falta
 obsession eval      # corre los 10 casos fijos (o: obsession eval iem-80)
 ```
 
@@ -16,13 +17,13 @@ cd app
 cargo run
 ```
 
-La app usa el mismo núcleo (`src/lib.rs`) que la CLI y muestra la búsqueda paso a paso. Primero aparece lo que entendió (necesidad, precio justo, candidatos). Después se ve qué busca cada experto, qué páginas se volvieron a abrir y cuáles se descartaron. Al final llega el veredicto, con la confianza, los avisos explicados y el enlace a la tienda. Lee `experts/`, `skills/` y `mcp.json` de este repo, o de `OBSESSION_HOME` si está definido.
+La app usa el mismo núcleo (`src/lib.rs`) que la CLI y muestra la búsqueda paso a paso. Primero aparece lo que entendió (necesidad, precio justo, candidatos). Después se ve qué busca cada experto, qué páginas se volvieron a abrir y cuáles se descartaron. Al final llega el veredicto, con la confianza, los avisos explicados y el enlace a la tienda. Lee los paquetes de `packages/` de este repo (o de `OBSESSION_HOME` si está definido) y los de `%LOCALAPPDATA%\Obsession\packages\`.
 
 Para revisar la interfaz en un navegador sin la app, graba una corrida con `OBSESSION_RECORD=ui/demo-events.jsonl obsession "…"` y abre `ui/index.html` desde un servidor estático: al pulsar Buscar, la reproduce.
 
 ## Conexiones (tiendas con tu sesión)
 
-Algunas tiendas muestran precios solo con tu cuenta. Un MCP en `mcp.json` que tiene un bloque `login` aparece en el panel **Conexiones** de la app y en `obsession connections`. Al conectar se abre el login del propio conector (hoy el de AnyWeb para Temu): una ventana normal del navegador con la página oficial de la tienda, donde inicias sesión tú. Obsession no ve contraseñas ni cookies; solo comprueba que el perfil del navegador exista. "Desconectar" (`obsession logout temu`) borra ese perfil.
+Algunas tiendas muestran precios solo con tu cuenta. Un MCP de un paquete que tiene un bloque `login` aparece en el panel **Conexiones** de la app y en `obsession connections`. Al conectar se abre el login del propio conector (hoy el de AnyWeb para Temu): una ventana normal del navegador con la página oficial de la tienda, donde inicias sesión tú. Obsession no ve contraseñas ni cookies; solo comprueba que el perfil del navegador exista. "Desconectar" (`obsession logout temu`) borra ese perfil.
 
 Los expertos de una tienda sin sesión no participan en la búsqueda, y la app avisa por qué.
 
@@ -51,11 +52,11 @@ Los proveedores se guardan sin secretos en `%LOCALAPPDATA%\Obsession\providers.j
 
 | Capa | Qué es | Dónde |
 |---|---|---|
-| **MCP** (las manos) | Servidores aparte, sin LLM. Cada tienda expone `search` por stdio (`obsession mcp amazon`). | `mcp.json` |
-| **Expertos** (agentes) | Un `.md` con frontmatter (`name`, `description`, `model`, `mcp`, `skills`, `max_steps`) y su prompt. Solo el orquestador los invoca. | `experts/*.md` |
-| **Skills** (cómo trabajar) | `SKILL.md` en formato estándar (Agent Skills) que el experto carga cuando la necesita. | `skills/*/SKILL.md` |
+| **MCP** (las manos) | Servidores aparte, sin LLM. Cada tienda expone `search` por stdio (`obsession mcp amazon`). | `mcp_servers` del paquete |
+| **Expertos** (agentes) | Un `.md` con frontmatter (`name`, `description`, `model`, `mcp`, `skills`, `max_steps`) y su prompt. Solo el orquestador los invoca. | `packages/*/experts/*.md` |
+| **Skills** (cómo trabajar) | `SKILL.md` en formato estándar (Agent Skills) que el experto carga cuando la necesita. | `packages/core/skills/*/SKILL.md` |
 
-Cada experto decide sus propias búsquedas, solo ve sus propios MCP y debe terminar con `submit`.
+Cada experto decide sus propias búsquedas, solo ve sus propios MCP y debe terminar con `submit`. Las tres capas se distribuyen en paquetes: ver [docs/packages.md](docs/packages.md).
 
 ## Flujo
 
@@ -78,5 +79,5 @@ Cada experto decide sus propias búsquedas, solo ve sus propios MCP y debe termi
 - Tiendas: Amazon, AliExpress, Falabella y Plaza Vea. Mercado Libre y Temu bloquean con anti-bot, y no se evade.
 - Los modelos van por el router magpie (`MAGPIE_URL`, por defecto `http://127.0.0.1:3425/v1`). Cada experto define su modelo en el frontmatter. `OBSESSION_MAIN` y `OBSESSION_VERIFIER` cambian el planificador y el verificador.
 - Cada corrida tiene un tope de tokens (`OBSESSION_MAX_TOKENS`, por defecto 400000). Al agotarse, los expertos entregan `submit` con lo que tienen y no se hace la ronda 2. El reporte final y `eval` muestran los tokens usados.
-- Para agregar un MCP externo: añade una entrada en `mcp.json` y nómbrala en el `mcp:` de un experto. Si devuelve listings con la forma `store, title, price_pen, url, seller, rating, sold`, entra al store. Si devuelve otra cosa, el texto se trunca.
-- `prompts/` y `prompts/expert_harness.md` se compilan dentro del binario: después de editarlos hay que recompilar. `experts/` y `skills/` se leen al ejecutar.
+- Para agregar un MCP externo: crea un paquete con su entrada en `mcp_servers` y un experto que la nombre en `mcp:` (`obsession install <carpeta>`). Si devuelve listings con la forma `store, title, price_pen, url, seller, rating, sold`, entra al store. Si devuelve otra cosa, el texto se trunca.
+- `prompts/` y `prompts/expert_harness.md` se compilan dentro del binario: después de editarlos hay que recompilar. Los paquetes se leen al ejecutar.

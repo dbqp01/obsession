@@ -20,7 +20,7 @@ fn profile_ready(name: &str) -> bool {
         .is_some_and(|mut entries| entries.next().is_some())
 }
 
-/// Every MCP server in `mcp.json` that declares a `login`, with whether its session is there.
+/// Every installed MCP server that declares a `login`, with whether its session is there.
 pub fn list(registry: &Value) -> Vec<Value> {
     registry["servers"]
         .as_object()
@@ -47,10 +47,10 @@ pub fn usable(registry: &Value, server: &str) -> bool {
 }
 
 /// Opens the platform's own login flow in a new console window and returns at once; the
-/// person finishes the login there. The command comes from `mcp.json`, never from a model.
+/// person finishes the login there. The command comes from an installed package, never from a model.
 pub fn start_login(registry: &Value, server: &str) -> Result<(), String> {
     let login = registry["servers"][server].get("login").ok_or(format!("«{server}» no necesita login"))?;
-    let command = login["command"].as_str().ok_or(format!("«{server}»: falta login.command en mcp.json"))?;
+    let command = login["command"].as_str().ok_or(format!("«{server}»: falta login.command en su paquete"))?;
     let args: Vec<&str> = login["args"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     let mut cmd = std::process::Command::new(command);
     cmd.args(&args);

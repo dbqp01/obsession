@@ -1,0 +1,11 @@
+{
+  "name": "tiendas-intl",
+  "version": "0.1.0",
+  "description": "Tiendas internacionales con precios en soles: Amazon y AliExpress.",
+  "source": "builtin",
+  "experts": ["experts/amazon.md", "experts/aliexpress.md"],
+  "mcp_servers": {
+    "amazon": {"command": "self", "args": ["mcp", "amazon"]},
+    "aliexpress": {"command": "self", "args": ["mcp", "aliexpress"]}
+  }
+}

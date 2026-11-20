@@ -66,7 +66,7 @@ pub struct Client {
 }
 
 impl Client {
-    /// Starts a server from an `mcp.json` entry. `"command": "self"` means this same executable,
+    /// Starts a server from a package `mcp_servers` entry. `"command": "self"` means this same executable,
     /// which answers `mcp <store>` before doing anything else (the CLI and the desktop app both do).
     pub fn from_config(cfg: &Value) -> Result<Self, String> {
         let self_exe = std::env::current_exe().map_err(|e| e.to_string())?;

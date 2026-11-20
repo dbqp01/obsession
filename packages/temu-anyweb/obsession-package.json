@@ -1,0 +1,25 @@
+{
+  "name": "temu-anyweb",
+  "version": "0.1.0",
+  "description": "Temu Perú con la sesión del usuario, a través del MCP de AnyWeb.",
+  "source": "anyweb",
+  "experts": ["experts/temu.md"],
+  "mcp_servers": {
+    "temu": {
+      "command": "node",
+      "args": ["C:/Users/akimi/Documents/ChatGPT/pluggin web2api/src/connectors/temu/entry.mjs"],
+      "login": {
+        "label": "Temu",
+        "site": "https://www.temu.com",
+        "profile": "temu-chrome",
+        "command": "node",
+        "args": ["C:/Users/akimi/Documents/ChatGPT/pluggin web2api/src/cli.mjs", "temu", "login"]
+      }
+    }
+  },
+  "requires": [
+    {"kind": "binary", "name": "node", "check": ">=24", "why": "el MCP de AnyWeb corre en Node 24"},
+    {"kind": "binary", "name": "chrome", "check": "C:/Program Files/Google/Chrome/Application/chrome.exe", "why": "AnyWeb abre Temu en Chrome"},
+    {"kind": "session", "name": "temu", "why": "Temu solo muestra precios con tu cuenta"}
+  ]
+}

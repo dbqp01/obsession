@@ -1,4 +1,4 @@
-use obsession::{agent, connections, eval, mcp, providers};
+use obsession::{connections, eval, mcp, packages, providers};
 use serde_json::Value;
 use std::path::Path;
 
@@ -7,16 +7,45 @@ fn main() {
     let root = Path::new(".");
     let result: Result<(), Box<dyn std::error::Error>> = match args.first().map(String::as_str) {
         Some("mcp") => mcp::serve(args.get(1).map(String::as_str).unwrap_or("")).map_err(Into::into),
-        Some("experts") => agent::load_experts("experts").map_err(Into::into).map(|experts| {
+        Some("experts") => {
+            let l = loaded(root);
+            let mut experts: Vec<_> = l.packages.iter().flat_map(|p| &p.experts).collect();
+            experts.sort_by(|a, b| a.name.cmp(&b.name));
             for e in experts {
                 println!("{:<12} mcp: {:<12} {}", e.name, e.mcp.join(","), e.description);
             }
-        }),
-        Some("skills") => agent::load_skills("skills").map_err(Into::into).map(|skills| {
-            for s in skills {
+            Ok(())
+        }
+        Some("skills") => {
+            for s in loaded(root).packages.iter().flat_map(|p| &p.skills) {
                 println!("{:<22} {}", s.name, s.description);
             }
+            Ok(())
+        }
+        Some("packages") => {
+            let l = loaded(root);
+            for p in &l.packages {
+                let m = &p.manifest;
+                let experts: Vec<&str> = p.experts.iter().map(|e| e.name.as_str()).collect();
+                let place = if p.builtin { "" } else { " (usuario)" };
+                println!("{:<14} {:<8} {:<8} expertos: {}{place}", m.name, m.version, m.source, experts.join(","));
+                for todo in packages::unmet(m, &l.registry) {
+                    println!("  ! {todo}");
+                }
+            }
+            Ok(())
+        }
+        Some("install") => user_dir().and_then(|user| {
+            let (name, todo) = packages::install(Path::new(arg1(&args)), &root.join("packages"), &user)?;
+            println!("Instalado {name} en {}", user.join(&name).display());
+            for t in todo {
+                println!("  ! {t}");
+            }
+            Ok(())
         }),
+        Some("uninstall") => user_dir()
+            .and_then(|user| packages::uninstall(arg1(&args), &root.join("packages"), &user).map_err(Into::into))
+            .map(|_| println!("Desinstalado.")),
         Some("connections") => obsession::load_registry(root).map(|reg| {
             for c in connections::list(&reg) {
                 let state = if c["connected"] == true { "conectado" } else { "sin sesión" };
@@ -66,7 +95,8 @@ fn main() {
 const USAGE: &str = "uso:
   obsession \"audífonos over-ear hasta 350 soles, Cusco\"
   obsession eval [caso]
-  obsession experts | skills | connections
+  obsession experts | skills | packages | connections
+  obsession install <carpeta> | uninstall <paquete>
   obsession login <plataforma> | logout <plataforma>
   obsession provider add <nombre> <base_url> | provider list
   obsession key set <proveedor>     (lee la clave de stdin, nunca de los argumentos)
@@ -83,6 +113,19 @@ fn read_key() -> Result<String, Box<dyn std::error::Error>> {
     let mut key = String::new();
     std::io::stdin().read_line(&mut key)?;
     Ok(key.trim().to_string())
+}
+
+/// Loaded packages; refused ones are reported on stderr so listings stay clean.
+fn loaded(root: &Path) -> packages::Loaded {
+    let l = packages::load(root);
+    for w in &l.warnings {
+        eprintln!("! {w}");
+    }
+    l
+}
+
+fn user_dir() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    packages::user_dir().ok_or_else(|| "no se encontró %LOCALAPPDATA%".into())
 }
 
 fn arg1(args: &[String]) -> &str {
