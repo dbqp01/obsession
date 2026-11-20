@@ -1,5 +1,5 @@
 use obsession::negotiate::{self as neg, Outcome};
-use obsession::{connections, db, eval, llm, mcp, packages, providers};
+use obsession::{connections, db, eval, llm, mcp, negsim, packages, providers};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -108,6 +108,7 @@ const USAGE: &str = "uso:
   obsession negotiate start --title T --ask N --target N --walkaway N [--url U] [--trust N] [--evidence PRECIO:título]...
   obsession negotiate show [id] | reply <id>   (reply lee la respuesta del vendedor de stdin)
   obsession negotiate approve <id> [--price N] | reject <id>
+  obsession negotiate eval [caso|persona]   (simulador; escribe eval/results/negotiation-<fecha>.md)
 modelos: byok:<proveedor>/<modelo> usa tu proveedor; cualquier otro id va por magpie";
 
 /// The key comes from stdin so it never lands in shell history or the process list.
@@ -181,6 +182,11 @@ type Res = Result<(), Box<dyn std::error::Error>>;
 
 /// Copilot negotiation: the agent drafts, you send from your own account and paste the reply back.
 fn negotiate(root: &Path, args: &[String]) -> Res {
+    if args.first().map(String::as_str) == Some("eval") {
+        return negsim::run(root, args.get(1).map(String::as_str), &|line| println!("{line}"))
+            .map(|out| println!("
+{}", serde_json::to_string_pretty(&out["summary"]).unwrap()));
+    }
     let db = db::open(&root.join("obsession.db").to_string_lossy())?;
     let now = neg::now();
     let usage = llm::Usage::from_env();
