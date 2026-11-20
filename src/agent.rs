@@ -220,6 +220,9 @@ pub fn run_expert(
                 "Último paso."
             };
             messages.push(json!({"role": "user", "content": format!("{why} Llama a submit ahora con lo que tienes.")}));
+            if blocked || broke {
+                note(format!("entrega antes de tiempo: {why}"));
+            }
         }
         let offered = if last { vec![submit_tool()] } else { tools.clone() };
         let msg = match llm::chat_tools(&expert.model, &messages, &offered, last, usage) {
