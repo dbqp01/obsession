@@ -12,7 +12,15 @@ pub fn open(path: &str) -> rusqlite::Result<Connection> {
             run_id INTEGER NOT NULL REFERENCES runs(id), id INTEGER NOT NULL,
             store TEXT, title TEXT, price_pen REAL, url TEXT, seller TEXT, rating REAL, sold TEXT,
             relevant INTEGER, trust INTEGER, true_cost_pen REAL, flags TEXT, note TEXT, rank INTEGER, why TEXT,
-            PRIMARY KEY (run_id, id));",
+            PRIMARY KEY (run_id, id));
+         CREATE TABLE IF NOT EXISTS negotiations (
+            id INTEGER PRIMARY KEY, run_id INTEGER REFERENCES runs(id), listing_url TEXT NOT NULL,
+            mode TEXT NOT NULL, status TEXT NOT NULL, case_json TEXT NOT NULL, our_offer REAL, seller_offer REAL,
+            concessions INTEGER DEFAULT 0, trust INTEGER, signals TEXT, created INTEGER DEFAULT (unixepoch()),
+            updated INTEGER);
+         CREATE TABLE IF NOT EXISTS neg_messages (
+            negotiation_id INTEGER REFERENCES negotiations(id), ts INTEGER NOT NULL, role TEXT NOT NULL,
+            text TEXT, meta TEXT);",
     )?;
     // Older databases predate the report column; adding it twice is the only expected error.
     let _ = db.execute("ALTER TABLE runs ADD COLUMN report TEXT", []);
@@ -67,6 +75,95 @@ pub fn save_ranking(db: &Connection, run: i64, ranking: &Value) -> rusqlite::Res
     }
     db.execute("UPDATE runs SET verdict = ?2 WHERE id = ?1", params![run, ranking["verdict"].as_str()])?;
     Ok(())
+}
+
+/// One negotiation row; `case_json` and `signals` stay JSON so the turn reads them as the model sees them.
+#[derive(Debug, Clone)]
+pub struct Negotiation {
+    pub id: i64,
+    pub run_id: Option<i64>,
+    pub status: String,
+    pub case: Value,
+    pub our_offer: Option<f64>,
+    pub seller_offer: Option<f64>,
+    pub concessions: i64,
+    pub signals: Vec<String>,
+    pub created: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NegMessage {
+    pub ts: i64,
+    pub role: String,
+    pub text: String,
+    pub meta: Value,
+}
+
+pub fn new_negotiation(db: &Connection, run_id: Option<i64>, case: &Value, status: &str, now: i64) -> rusqlite::Result<i64> {
+    db.execute(
+        "INSERT INTO negotiations (run_id, listing_url, mode, status, case_json, trust, signals, created, updated)
+         VALUES (?1, ?2, 'copilot', ?3, ?4, ?5, '[]', ?6, ?6)",
+        params![run_id, case["listing"]["url"].as_str().unwrap_or(""), status, case.to_string(),
+            case["trust"]["score"].as_i64(), now],
+    )?;
+    Ok(db.last_insert_rowid())
+}
+
+pub fn negotiation(db: &Connection, id: i64) -> rusqlite::Result<Negotiation> {
+    db.query_row(
+        "SELECT id, run_id, status, case_json, our_offer, seller_offer, concessions, signals, created
+         FROM negotiations WHERE id = ?1",
+        [id],
+        |r| {
+            let json = |i: usize| r.get::<_, Option<String>>(i).map(|t| t.and_then(|t| serde_json::from_str(&t).ok()));
+            Ok(Negotiation {
+                id: r.get(0)?,
+                run_id: r.get(1)?,
+                status: r.get(2)?,
+                case: json(3)?.unwrap_or_default(),
+                our_offer: r.get(4)?,
+                seller_offer: r.get(5)?,
+                concessions: r.get(6)?,
+                signals: serde_json::from_value(json(7)?.unwrap_or_default()).unwrap_or_default(),
+                created: r.get(8)?,
+            })
+        },
+    )
+}
+
+pub fn negotiation_ids(db: &Connection) -> rusqlite::Result<Vec<i64>> {
+    db.prepare("SELECT id FROM negotiations ORDER BY id")?.query_map([], |r| r.get(0))?.collect()
+}
+
+pub fn save_negotiation(db: &Connection, n: &Negotiation, now: i64) -> rusqlite::Result<()> {
+    db.execute(
+        "UPDATE negotiations SET status = ?2, our_offer = ?3, seller_offer = ?4, concessions = ?5, signals = ?6,
+         updated = ?7 WHERE id = ?1",
+        params![n.id, n.status, n.our_offer, n.seller_offer, n.concessions, serde_json::to_string(&n.signals).unwrap(), now],
+    )?;
+    Ok(())
+}
+
+pub fn add_neg_message(db: &Connection, id: i64, ts: i64, role: &str, text: &str, meta: &Value) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT INTO neg_messages (negotiation_id, ts, role, text, meta) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, ts, role, text, meta.to_string()],
+    )?;
+    Ok(())
+}
+
+/// Messages in insertion order (rowid), so same-second rows keep the order they happened in.
+pub fn neg_messages(db: &Connection, id: i64) -> rusqlite::Result<Vec<NegMessage>> {
+    db.prepare("SELECT ts, role, text, meta FROM neg_messages WHERE negotiation_id = ?1 ORDER BY rowid")?
+        .query_map([id], |r| {
+            Ok(NegMessage {
+                ts: r.get(0)?,
+                role: r.get(1)?,
+                text: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                meta: r.get::<_, Option<String>>(3)?.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default(),
+            })
+        })?
+        .collect()
 }
 
 /// Every verified-relevant listing of the run, best ranked first, as CSV.
