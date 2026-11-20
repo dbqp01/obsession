@@ -161,7 +161,9 @@ fn failed(reason: String) -> Value {
 
 /// Runs one expert to completion. Always returns a submission, even on failure, so the
 /// orchestrator never waits on an expert that gave up.
-pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill], store: &Store, emit: Emit) -> Value {
+pub fn run_expert(
+    expert: &Expert, task: &str, registry: &Value, skills: &[Skill], store: &Store, usage: &llm::Usage, emit: Emit,
+) -> Value {
     let name = expert.name.as_str();
     let note = |text: String| emit(json!({"kind": "expert_note", "expert": name, "text": text}));
 
@@ -207,13 +209,20 @@ pub fn run_expert(expert: &Expert, task: &str, registry: &Value, skills: &[Skill
 
     for step in 0..expert.max_steps {
         // A store that blocks stays blocked: more searches only burn steps.
-        let last = blocked || step + 1 == expert.max_steps;
+        let broke = usage.spent();
+        let last = blocked || broke || step + 1 == expert.max_steps;
         if last {
-            let why = if blocked { "La tienda bloqueó las búsquedas." } else { "Último paso." };
+            let why = if blocked {
+                "La tienda bloqueó las búsquedas."
+            } else if broke {
+                "Se agotó el presupuesto de tokens de la búsqueda."
+            } else {
+                "Último paso."
+            };
             messages.push(json!({"role": "user", "content": format!("{why} Llama a submit ahora con lo que tienes.")}));
         }
         let offered = if last { vec![submit_tool()] } else { tools.clone() };
-        let msg = match llm::chat_tools(&expert.model, &messages, &offered, last) {
+        let msg = match llm::chat_tools(&expert.model, &messages, &offered, last, usage) {
             Ok(m) => m,
             Err(e) => return failed(format!("el modelo falló: {e}")),
         };
