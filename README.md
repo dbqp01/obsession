@@ -48,6 +48,20 @@ Los proveedores se guardan sin secretos en `%LOCALAPPDATA%\Obsession\providers.j
 
 `obsession eval` corre las consultas de `eval/cases.json`. A cada pick lo vuelve a abrir en su página y lo marca como falso si no abre, si el precio se movió más de 5 % o si es un accesorio. También pide la respuesta a un modelo sin tools, para comparar. El resultado queda en `eval/results/<fecha>.md`, una tabla lado a lado donde tú marcas, caso por caso, si Obsession eligió mejor, igual o peor.
 
+## Negociación (copiloto)
+
+El negociador redacta cada mensaje al vendedor; tú lo copias, lo envías desde tu cuenta y pegas la respuesta. Nunca envía nada por su cuenta ni mueve dinero.
+
+```
+obsession negotiate start 12 1                         # propone target y walk-away desde el pick 1 de la corrida 12
+obsession negotiate start 12 1 --target 900 --walkaway 980
+echo "lo menos 1000" | obsession negotiate reply 3     # la respuesta del vendedor entra por stdin
+obsession negotiate show 3                             # hilo, estado, checkpoint pendiente
+obsession negotiate approve 3 [--price 940] | reject 3
+```
+
+Los guardas G1-G5 de `docs/design/negotiation.md` corren en código antes de mostrar cada borrador: nada sobre el walk-away, ningún cierre o pago sin un checkpoint aprobado con ese precio, sin datos personales (`OBSESSION_OWNER_NAME` se usa solo para bloquear tu nombre), solo comparables de la evidencia, sin links ni códigos de verificación. El estado vive en `obsession.db`, así que una negociación sigue al día siguiente. Modelo: `OBSESSION_NEGOTIATOR` (por defecto el de `OBSESSION_MAIN`).
+
 ## Tres capas
 
 | Capa | Qué es | Dónde |

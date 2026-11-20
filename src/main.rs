@@ -1,5 +1,6 @@
-use obsession::{connections, eval, mcp, packages, providers};
-use serde_json::Value;
+use obsession::negotiate::{self as neg, Outcome};
+use obsession::{connections, db, eval, llm, mcp, packages, providers};
+use serde_json::{Value, json};
 use std::path::Path;
 
 fn main() {
@@ -80,6 +81,7 @@ fn main() {
         },
         Some("eval") => eval::run(root, args.get(1).map(String::as_str), &print_event)
             .map(|out| println!("\n{}", serde_json::to_string_pretty(&out["summary"]).unwrap())),
+        Some("negotiate") => negotiate(root, &args[1..]),
         Some(_) => obsession::run(root, &args.join(" "), &print_event).map(|_| ()),
         None => {
             eprintln!("{USAGE}");
@@ -102,6 +104,10 @@ const USAGE: &str = "uso:
   obsession key set <proveedor>     (lee la clave de stdin, nunca de los argumentos)
   obsession key remove <proveedor>
   obsession mcp <tienda>
+  obsession negotiate start <run_id> <rank> [--target N --walkaway N]
+  obsession negotiate start --title T --ask N --target N --walkaway N [--url U] [--trust N] [--evidence PRECIO:título]...
+  obsession negotiate show [id] | reply <id>   (reply lee la respuesta del vendedor de stdin)
+  obsession negotiate approve <id> [--price N] | reject <id>
 modelos: byok:<proveedor>/<modelo> usa tu proveedor; cualquier otro id va por magpie";
 
 /// The key comes from stdin so it never lands in shell history or the process list.
@@ -169,4 +175,147 @@ fn print_event(e: Value) {
         }
         _ => {}
     }
+}
+
+type Res = Result<(), Box<dyn std::error::Error>>;
+
+/// Copilot negotiation: the agent drafts, you send from your own account and paste the reply back.
+fn negotiate(root: &Path, args: &[String]) -> Res {
+    let db = db::open(&root.join("obsession.db").to_string_lossy())?;
+    let now = neg::now();
+    let usage = llm::Usage::from_env();
+    let model = neg::negotiator_model();
+    let chat = |m: &[Value], t: &[Value], force: bool| llm::chat_tools(&model, m, t, force, &usage);
+    let spent = || usage.spent();
+    let skill = neg::skill_body(root);
+    let skill = skill.as_deref();
+    let pos = |i: usize| args.get(i).filter(|a| !a.starts_with("--")).map(String::as_str);
+    let num = |name: &str| -> Result<Option<f64>, String> {
+        flag(args, name).map(|v| v.parse::<f64>().map_err(|_| format!("{name} no es un número: {v}"))).transpose()
+    };
+    let id = || -> Result<i64, String> { pos(1).and_then(|v| v.parse().ok()).ok_or_else(|| "falta el id de la negociación".into()) };
+    match args.first().map(String::as_str) {
+        Some("start") => {
+            let (run_id, mut case) = match (pos(1), pos(2)) {
+                (Some(run), Some(rank)) => {
+                    let run: i64 = run.parse().map_err(|_| "run_id no válido")?;
+                    (Some(run), neg::case_from_pick(&db, run, rank.parse().map_err(|_| "rank no válido")?)?)
+                }
+                _ => {
+                    let evidence: Vec<Value> = flags(args, "--evidence")
+                        .iter()
+                        .enumerate()
+                        .map(|(i, e)| {
+                            let (p, title) = e.split_once(':').ok_or(format!("--evidence va como PRECIO:título: {e}"))?;
+                            let p: f64 = p.trim().parse().map_err(|_| format!("precio no válido en --evidence: {p}"))?;
+                            Ok(json!({"id": format!("e{}", i + 1), "title": title.trim(), "price_pen": p}))
+                        })
+                        .collect::<Result<_, String>>()?;
+                    let ask = num("--ask")?.ok_or("falta --ask (o usa <run_id> <rank>)")?;
+                    (None, json!({"listing": {"title": flag(args, "--title").unwrap_or(""), "url": flag(args, "--url").unwrap_or(""),
+                        "ask_pen": ask}, "evidence": evidence, "trust": {"score": num("--trust")?.map(|t| t as i64)},
+                        "mode": "copilot"}))
+                }
+            };
+            let (Some(target), Some(walkaway)) = (num("--target")?, num("--walkaway")?) else {
+                println!("Propuesta para «{}» (pide S/ {}):\n  target S/ {}  walk-away S/ {}\n  {} comparables verificados",
+                    s(&case["listing"]["title"]), case["listing"]["ask_pen"], case["target_pen"], case["walkaway_pen"],
+                    case["evidence"].as_array().map_or(0, |e| e.len()));
+                println!("Confírmalos (o edítalos) repitiendo el comando con --target N --walkaway N.");
+                return Ok(());
+            };
+            case["target_pen"] = json!(target);
+            case["walkaway_pen"] = json!(walkaway);
+            let id = neg::start(&db, run_id, &case, now)?;
+            println!("Negociación {id} creada en modo copiloto.");
+            if neg::pending_checkpoint(&db, id)?.is_some() {
+                println!("El vendedor tiene trust bajo: decide con `obsession negotiate approve {id}` o `reject {id}`.");
+                return Ok(());
+            }
+            print_turn(id, &neg::advance(&db, id, "start", now, skill, &chat, &spent)?);
+        }
+        Some("show") => match pos(1) {
+            None => {
+                for id in db::negotiation_ids(&db)? {
+                    let n = db::negotiation(&db, id)?;
+                    println!("{id:<4} {:<22} nosotros S/ {:<8} vendedor S/ {:<8} {}", n.status, opt(n.our_offer),
+                        opt(n.seller_offer), s(&n.case["listing"]["title"]));
+                }
+            }
+            Some(_) => {
+                let id = id()?;
+                let n = db::negotiation(&db, id)?;
+                let c = &n.case;
+                println!("{} — pide S/ {} · target S/ {} · walk-away S/ {}\nestado: {} · nosotros S/ {} · vendedor S/ {} · concesiones {} · señales {:?}\n",
+                    s(&c["listing"]["title"]), c["listing"]["ask_pen"], c["target_pen"], c["walkaway_pen"], n.status,
+                    opt(n.our_offer), opt(n.seller_offer), n.concessions, n.signals);
+                for m in db::neg_messages(&db, id)? {
+                    println!("[{}] {}", m.role, m.text);
+                }
+                if let Some(hint) = neg::limit_hint(&db, id, now)? {
+                    println!("\nSugerencia de ritmo: {hint}.");
+                }
+            }
+        },
+        Some("reply") => {
+            let id = id()?;
+            use std::io::{IsTerminal, Read};
+            if std::io::stdin().is_terminal() {
+                eprintln!("Pega la respuesta del vendedor y termina con Ctrl+Z y Enter:");
+            }
+            let mut text = String::new();
+            std::io::stdin().read_to_string(&mut text)?;
+            print_turn(id, &neg::reply(&db, id, &text, now, skill, &chat, &spent)?);
+        }
+        Some(verb @ ("approve" | "reject")) => {
+            let id = id()?;
+            let approved = verb == "approve";
+            let a = neg::decide(&db, id, approved, num("--price")?, now)?;
+            println!("{} {} {}.", if approved { "Aprobado" } else { "Rechazado" }, a.kind,
+                a.price_pen.map(|p| format!("en S/ {p}")).unwrap_or_default());
+            let event = if approved { "approval" } else { "rejection" };
+            print_turn(id, &neg::advance(&db, id, event, now, skill, &chat, &spent)?);
+        }
+        _ => return Err(USAGE.into()),
+    }
+    Ok(())
+}
+
+fn print_turn(id: i64, t: &neg::Turn) {
+    for (b, draft) in &t.blocks {
+        println!("  guarda {}: {} («{draft}»)", b.guard, b.reason);
+    }
+    match &t.outcome {
+        Outcome::Message { text, .. } => {
+            println!("\nBorrador (cópialo y envíalo tú desde tu cuenta):\n  {text}");
+            println!("Cuando responda: obsession negotiate reply {id}");
+        }
+        Outcome::Checkpoint { kind, price, terms, summary, warnings } => {
+            println!("\nCheckpoint {kind}: {summary}\n  precio: {}  condiciones: {terms}",
+                price.map(|p| format!("S/ {p}")).unwrap_or("-".into()));
+            for w in warnings {
+                println!("  ! {w}");
+            }
+            println!("Decide: obsession negotiate approve {id} [--price N] | reject {id}");
+        }
+        Outcome::WalkAway { reason, final_message } => {
+            println!("\nEl agente propone retirarse: {reason}");
+            if let Some(m) = final_message {
+                println!("Mensaje de despedida (envíalo tú):\n  {m}");
+            }
+        }
+        Outcome::Nothing(note) => println!("\nSin mensaje: {note}"),
+    }
+}
+
+fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
+}
+
+fn flags<'a>(args: &'a [String], name: &str) -> Vec<&'a str> {
+    args.windows(2).filter(|w| w[0] == name).map(|w| w[1].as_str()).collect()
+}
+
+fn opt(v: Option<f64>) -> String {
+    v.map(|p| p.to_string()).unwrap_or("-".into())
 }

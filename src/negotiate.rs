@@ -1,6 +1,8 @@
 //! The buyer-side negotiator: guards, approvals and message limits (code, not prompt), and the turn loop.
 //! v0 is copilot only: the agent drafts, a human sends. No code path here talks to a real platform.
+use crate::db;
 use regex::Regex;
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 
@@ -258,6 +260,394 @@ pub fn limit(sent: &[(i64, i64)], thread: i64, unanswered: usize, now: i64) -> R
     Ok(())
 }
 
+// ---- Turn loop -------------------------------------------------------------------------------
+
+const PROMPT: &str = include_str!("../prompts/negotiator.md");
+pub const MAX_STEPS: usize = 4;
+const THREAD_TAIL: usize = 20;
+const SIGNALS: [&str; 6] = ["pide_adelanto", "presion", "niega_prueba", "saca_del_chat", "historia_inconsistente", "precio_irreal"];
+pub const STRONG_SIGNALS: [&str; 2] = ["pide_adelanto", "saca_del_chat"];
+const INTENTS: [&str; 6] = ["opening", "question", "proof_request", "counter", "follow_up", "conditional_accept"];
+const CHECKPOINTS: [&str; 5] = ["accept_price", "meeting", "payment_method", "share_contact", "continue_low_trust"];
+
+/// One model step: (messages, tools, force a tool call) -> assistant message. Injected so tests and
+/// the simulator can script it.
+pub type Chat<'a> = &'a dyn Fn(&[Value], &[Value], bool) -> Result<Value, String>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Outcome {
+    Message { text: String, intent: String, price: Option<f64> },
+    Checkpoint { kind: String, price: Option<f64>, terms: String, summary: String, warnings: Vec<String> },
+    WalkAway { reason: String, final_message: Option<String> },
+    /// The turn ended without anything for the seller; the note is for the human.
+    Nothing(String),
+}
+
+#[derive(Debug)]
+pub struct Turn {
+    pub outcome: Outcome,
+    /// Every draft a guard stopped: (block, draft text).
+    pub blocks: Vec<(Block, String)>,
+}
+
+/// True when the agent's signals reach the skill's threshold: one strong or two weak.
+pub fn scam_flagged(signals: &[String]) -> bool {
+    signals.iter().any(|s| STRONG_SIGNALS.contains(&s.as_str())) || signals.len() >= 2
+}
+
+/// Approvals the human granted that still hold for the seller's current offer.
+pub fn live_approvals(thread: &[db::NegMessage], seller_offer: Option<f64>) -> Vec<Approval> {
+    thread
+        .iter()
+        .filter(|m| m.role == "approval" && m.meta["approved"] == true)
+        .map(|m| Approval::from_meta(&m.meta))
+        .filter(|a| a.live(seller_offer))
+        .collect()
+}
+
+fn owner_name() -> Option<String> {
+    std::env::var("OBSESSION_OWNER_NAME").ok()
+}
+
+fn function(name: &str, description: &str, parameters: Value) -> Value {
+    json!({"type": "function", "function": {"name": name, "description": description, "parameters": parameters}})
+}
+
+fn terminal_tools() -> Vec<Value> {
+    vec![
+        function("propose_message", "Redacta el siguiente mensaje al vendedor. Termina el turno.",
+            json!({"type": "object", "required": ["text", "intent"], "properties": {
+                "text": {"type": "string"}, "intent": {"type": "string", "enum": INTENTS},
+                "price_pen": {"type": "number"}}})),
+        function("request_human_checkpoint", "Pide una decisión al dueño. Termina el turno.",
+            json!({"type": "object", "required": ["kind", "terms", "summary"], "properties": {
+                "kind": {"type": "string", "enum": CHECKPOINTS}, "price_pen": {"type": "number"},
+                "terms": {"type": "string"}, "summary": {"type": "string"},
+                "warnings": {"type": "array", "items": {"type": "string"}}}})),
+        function("walk_away", "Cierra la negociación sin trato. Termina el turno.",
+            json!({"type": "object", "required": ["reason"], "properties": {
+                "reason": {"type": "string"}, "final_message": {"type": "string"}}})),
+    ]
+}
+
+fn all_tools() -> Vec<Value> {
+    let mut tools = vec![
+        function("read_reply", "Devuelve el hilo completo y las horas desde el último mensaje.", json!({"type": "object", "properties": {}})),
+        function("update_offer", "Actualiza ofertas y señales del vendedor.",
+            json!({"type": "object", "required": ["note"], "properties": {
+                "our_offer_pen": {"type": "number"}, "seller_offer_pen": {"type": "number"},
+                "seller_signals": {"type": "array", "items": {"type": "string", "enum": SIGNALS}},
+                "note": {"type": "string"}}})),
+        function("load_skill", "Carga las instrucciones completas de una skill.",
+            json!({"type": "object", "required": ["name"], "properties": {"name": {"type": "string", "enum": ["negotiation"]}}})),
+    ];
+    tools.extend(terminal_tools());
+    tools
+}
+
+/// What the model sees of the thread: no drafts, no guard logs.
+fn visible(thread: &[db::NegMessage], now: i64) -> Vec<Value> {
+    thread
+        .iter()
+        .filter(|m| matches!(m.role.as_str(), "seller" | "sent" | "checkpoint" | "approval" | "human_note"))
+        .map(|m| json!({"role": m.role, "text": m.text, "hours_ago": (now - m.ts) / 3600, "meta": m.meta}))
+        .collect()
+}
+
+fn hours_since_last(thread: &[db::NegMessage], now: i64) -> Option<i64> {
+    thread.iter().filter(|m| m.role == "seller" || m.role == "sent").map(|m| (now - m.ts) / 3600).min()
+}
+
+/// Runs one negotiator turn. Updates `n` in place (offers, signals, concessions); the caller persists.
+pub fn turn(n: &mut db::Negotiation, thread: &[db::NegMessage], event: &str, now: i64, skill: Option<&str>,
+    chat: Chat, spent: &dyn Fn() -> bool) -> Turn {
+    let state = json!({"status": n.status, "our_offer_pen": n.our_offer, "seller_offer_pen": n.seller_offer,
+        "concessions": n.concessions, "signals": n.signals, "days_since_start": (now - n.created) / 86_400,
+        "hours_since_last_message": hours_since_last(thread, now)});
+    let tail = visible(thread, now);
+    let tail = &tail[tail.len().saturating_sub(THREAD_TAIL)..];
+    let input = json!({"event": event, "case": n.case, "state": state, "messages": tail,
+        "approvals": live_approvals(thread, n.seller_offer).iter().map(Approval::meta).collect::<Vec<_>>()});
+    let mut messages = vec![json!({"role": "system", "content": PROMPT}), json!({"role": "user", "content": input.to_string()})];
+    let mut blocks = Vec::new();
+    let owner = owner_name();
+    for step in 0..MAX_STEPS {
+        let last = step + 1 == MAX_STEPS || spent();
+        if last {
+            messages.push(json!({"role": "user", "content": "Último paso: termina el turno con propose_message, request_human_checkpoint o walk_away."}));
+        }
+        let offered = if last { terminal_tools() } else { all_tools() };
+        let msg = match chat(&messages, &offered, last) {
+            Ok(m) => m,
+            Err(e) => return Turn { outcome: Outcome::Nothing(format!("el modelo falló: {e}")), blocks },
+        };
+        let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
+        if calls.is_empty() {
+            messages.push(json!({"role": "assistant", "content": msg["content"].as_str().unwrap_or("")}));
+            messages.push(json!({"role": "user", "content": "Responde con una llamada a tool."}));
+            continue;
+        }
+        messages.push(json!({"role": "assistant", "content": msg["content"].as_str().unwrap_or(""), "tool_calls": calls}));
+        let mut done = None;
+        for call in &calls {
+            let name = call["function"]["name"].as_str().unwrap_or("");
+            let args: Value = serde_json::from_str(call["function"]["arguments"].as_str().unwrap_or("{}")).unwrap_or(json!({}));
+            let text = |k: &str| args[k].as_str().unwrap_or("").trim().to_string();
+            let approvals = live_approvals(thread, n.seller_offer);
+            let mut guarded = |draft: &str, intent: &str, price: Option<f64>| -> Result<(), String> {
+                let found = check(draft, intent, price, &n.case, &approvals, owner.as_deref());
+                if found.is_empty() {
+                    return Ok(());
+                }
+                let why: Vec<String> = found.iter().map(|b| format!("{}: {}", b.guard, b.reason)).collect();
+                blocks.extend(found.into_iter().map(|b| (b, draft.to_string())));
+                Err(format!("bloqueado por los guardas ({}). Reescribe el mensaje.", why.join("; ")))
+            };
+            let result = if done.is_some() {
+                "ignorado: el turno ya terminó".to_string()
+            } else {
+                match name {
+                    "read_reply" => json!({"messages": visible(thread, now), "hours_since_last_message": hours_since_last(thread, now)}).to_string(),
+                    "load_skill" => skill.unwrap_or("skill no disponible").to_string(),
+                    "update_offer" => {
+                        if let Some(p) = args["our_offer_pen"].as_f64() {
+                            n.our_offer = Some(p);
+                        }
+                        if let Some(p) = args["seller_offer_pen"].as_f64() {
+                            n.seller_offer = Some(p);
+                        }
+                        for s in args["seller_signals"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                            if SIGNALS.contains(&s) && !n.signals.iter().any(|x| x == s) {
+                                n.signals.push(s.to_string());
+                            }
+                        }
+                        "ok".into()
+                    }
+                    "propose_message" => {
+                        let (draft, intent, price) = (text("text"), text("intent"), args["price_pen"].as_f64());
+                        if !INTENTS.contains(&intent.as_str()) {
+                            format!("intent no válido: {intent}")
+                        } else if draft.is_empty() {
+                            "el mensaje está vacío".into()
+                        } else {
+                            match guarded(&draft, &intent, price) {
+                                Err(e) => e,
+                                Ok(()) => {
+                                    done = Some(Outcome::Message { text: draft, intent, price });
+                                    "ok".into()
+                                }
+                            }
+                        }
+                    }
+                    "request_human_checkpoint" => {
+                        let kind = text("kind");
+                        if CHECKPOINTS.contains(&kind.as_str()) {
+                            done = Some(Outcome::Checkpoint {
+                                kind, price: args["price_pen"].as_f64(), terms: text("terms"), summary: text("summary"),
+                                warnings: args["warnings"].as_array().into_iter().flatten()
+                                    .filter_map(|w| w.as_str().map(String::from)).collect(),
+                            });
+                            "ok".into()
+                        } else {
+                            format!("kind no válido: {kind}")
+                        }
+                    }
+                    "walk_away" => {
+                        let last_words = Some(text("final_message")).filter(|m| !m.is_empty());
+                        match last_words.as_deref().map(|m| guarded(m, "follow_up", None)) {
+                            Some(Err(e)) => e,
+                            _ => {
+                                done = Some(Outcome::WalkAway { reason: text("reason"), final_message: last_words });
+                                "ok".into()
+                            }
+                        }
+                    }
+                    _ => format!("tool desconocida: {name}"),
+                }
+            };
+            messages.push(json!({"role": "tool", "tool_call_id": call["id"], "content": result}));
+        }
+        if let Some(outcome) = done {
+            if let Outcome::Message { intent, price: Some(p), .. } = &outcome {
+                if matches!(intent.as_str(), "counter" | "conditional_accept") {
+                    if n.our_offer.is_some_and(|o| *p > o) {
+                        n.concessions += 1;
+                    }
+                    n.our_offer = Some(*p);
+                }
+            }
+            return Turn { outcome, blocks };
+        }
+    }
+    let note = if blocks.is_empty() { "el turno terminó sin decisión" } else { "el borrador siguió bloqueado por los guardas; no hay mensaje" };
+    Turn { outcome: Outcome::Nothing(note.into()), blocks }
+}
+
+// ---- Copilot operations: every step persists to obsession.db, so a negotiation survives days ----
+
+pub fn negotiator_model() -> String {
+    crate::model("OBSESSION_NEGOTIATOR", &crate::main_model())
+}
+
+pub fn skill_body(root: &std::path::Path) -> Option<String> {
+    crate::packages::load(root).packages.into_iter().flat_map(|p| p.skills).find(|s| s.name == "negotiation").map(|s| s.body)
+}
+
+pub fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The case a run's pick proposes. Target and walk-away are proposals: the human confirms them.
+pub fn case_from_pick(db: &Connection, run_id: i64, rank: usize) -> Result<Value, String> {
+    let report: Option<String> = db
+        .query_row("SELECT report FROM runs WHERE id = ?1", [run_id], |r| r.get(0))
+        .map_err(|_| format!("no existe la corrida {run_id}"))?;
+    let report: Value = report.and_then(|r| serde_json::from_str(&r).ok()).ok_or("la corrida no tiene reporte")?;
+    let picks = report["picks"].as_array().cloned().unwrap_or_default();
+    let pick = picks.get(rank.wrapping_sub(1)).ok_or(format!("la corrida {run_id} no tiene el pick {rank}"))?;
+    let mut stmt = db
+        .prepare("SELECT id, store, title, price_pen, url FROM listings WHERE run_id = ?1 AND relevant = 1 AND id != ?2")
+        .map_err(|e| e.to_string())?;
+    let evidence: Vec<Value> = stmt
+        .query_map(rusqlite::params![run_id, pick["id"].as_i64()], |r| {
+            Ok(json!({"id": format!("e{}", r.get::<_, i64>(0)?), "store": r.get::<_, String>(1)?,
+                "title": r.get::<_, String>(2)?, "price_pen": r.get::<_, f64>(3)?, "url": r.get::<_, String>(4)?}))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+    let target = evidence.iter().filter_map(|e| e["price_pen"].as_f64()).fold(f64::INFINITY, f64::min);
+    let budget = report["dossier"]["budget_pen"].as_f64().unwrap_or(f64::INFINITY);
+    let alternative = picks.iter().filter(|p| p["id"] != pick["id"]).filter_map(|p| p["true_cost_pen"].as_f64()).fold(f64::INFINITY, f64::min);
+    let walkaway = budget.min(alternative);
+    Ok(json!({
+        "listing": {"title": pick["title"], "url": pick["url"], "store": pick["store"], "seller": pick["seller"], "ask_pen": pick["price_pen"]},
+        "evidence": evidence, "fair_price_pen": report["dossier"]["fair_price_pen"],
+        "target_pen": target.is_finite().then_some(target), "walkaway_pen": walkaway.is_finite().then_some(walkaway),
+        "trust": {"score": pick["trust"], "flags": pick["flags"], "note": pick["note"]}, "mode": "copilot",
+    }))
+}
+
+/// Creates the negotiation with limits the human confirmed. Low trust waits for a checkpoint first.
+pub fn start(db: &Connection, run_id: Option<i64>, case: &Value, now: i64) -> Result<i64, String> {
+    let (Some(target), Some(walkaway)) = (case["target_pen"].as_f64(), case["walkaway_pen"].as_f64()) else {
+        return Err("faltan target y walk-away confirmados".into());
+    };
+    if !(target > 0.0 && target <= walkaway) {
+        return Err("el target debe ser positivo y no mayor que el walk-away".into());
+    }
+    let low = case["trust"]["score"].as_i64().is_some_and(|s| s < 40);
+    let id = db::new_negotiation(db, run_id, case, if low { "awaiting_human" } else { "drafting" }, now).map_err(|e| e.to_string())?;
+    if low {
+        let meta = json!({"kind": "continue_low_trust", "terms": "seguir pese al trust bajo", "warnings": case["trust"]["flags"]});
+        db::add_neg_message(db, id, now, "checkpoint", "El trust del vendedor es menor que 40. ¿Seguimos?", &meta).map_err(|e| e.to_string())?;
+    }
+    Ok(id)
+}
+
+/// Runs a turn on the stored negotiation and stores what came out of it.
+pub fn advance(db: &Connection, id: i64, event: &str, now: i64, skill: Option<&str>, chat: Chat, spent: &dyn Fn() -> bool)
+    -> Result<Turn, String> {
+    let e = |e: rusqlite::Error| e.to_string();
+    let mut n = db::negotiation(db, id).map_err(e)?;
+    if matches!(n.status.as_str(), "walked" | "paused") {
+        return Err(format!("la negociación {id} está {}", n.status));
+    }
+    let thread = db::neg_messages(db, id).map_err(e)?;
+    let t = turn(&mut n, &thread, event, now, skill, chat, spent);
+    for (b, draft) in &t.blocks {
+        db::add_neg_message(db, id, now, "guard_block", draft, &json!({"guard": b.guard, "reason": b.reason})).map_err(e)?;
+    }
+    match &t.outcome {
+        Outcome::Message { text, intent, price } => {
+            db::add_neg_message(db, id, now, "agent_draft", text, &json!({"intent": intent, "price_pen": price})).map_err(e)?;
+            n.status = if intent == "conditional_accept" { "deal_pending_payment" } else { "waiting_seller" }.into();
+        }
+        Outcome::Checkpoint { kind, price, terms, summary, warnings } => {
+            let meta = json!({"kind": kind, "price_pen": price, "terms": terms, "warnings": warnings});
+            db::add_neg_message(db, id, now, "checkpoint", summary, &meta).map_err(e)?;
+            n.status = "awaiting_human".into();
+        }
+        Outcome::WalkAway { reason, final_message } => {
+            if let Some(m) = final_message {
+                db::add_neg_message(db, id, now, "agent_draft", m, &json!({"intent": "walk_away"})).map_err(e)?;
+            }
+            db::add_neg_message(db, id, now, "human_note", &format!("El agente se retira: {reason}"), &json!({})).map_err(e)?;
+            n.status = "walked".into();
+        }
+        Outcome::Nothing(note) => {
+            db::add_neg_message(db, id, now, "human_note", note, &json!({})).map_err(e)?;
+            n.status = "drafting".into();
+        }
+    }
+    db::save_negotiation(db, &n, now).map_err(e)?;
+    Ok(t)
+}
+
+/// The human pasted the seller's reply. Their last unsent draft is taken as sent: the human sends.
+pub fn reply(db: &Connection, id: i64, text: &str, now: i64, skill: Option<&str>, chat: Chat, spent: &dyn Fn() -> bool)
+    -> Result<Turn, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("la respuesta del vendedor está vacía".into());
+    }
+    mark_sent(db, id, now)?;
+    db::add_neg_message(db, id, now, "seller", text, &json!({})).map_err(|e| e.to_string())?;
+    advance(db, id, "seller_reply", now, skill, chat, spent)
+}
+
+pub fn mark_sent(db: &Connection, id: i64, now: i64) -> Result<(), String> {
+    let thread = db::neg_messages(db, id).map_err(|e| e.to_string())?;
+    let last = thread.iter().rev().find(|m| matches!(m.role.as_str(), "agent_draft" | "sent" | "seller"));
+    if let Some(m) = last.filter(|m| m.role == "agent_draft") {
+        db::add_neg_message(db, id, now, "sent", &m.text, &m.meta).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// The open checkpoint, if the negotiation waits on the human.
+pub fn pending_checkpoint(db: &Connection, id: i64) -> Result<Option<db::NegMessage>, String> {
+    let n = db::negotiation(db, id).map_err(|e| e.to_string())?;
+    if n.status != "awaiting_human" {
+        return Ok(None);
+    }
+    Ok(db::neg_messages(db, id).map_err(|e| e.to_string())?.into_iter().rev().find(|m| m.role == "checkpoint"))
+}
+
+/// Records the human's answer to the open checkpoint. `price` lets them edit it down, never up.
+pub fn decide(db: &Connection, id: i64, approved: bool, price: Option<f64>, now: i64) -> Result<Approval, String> {
+    let cp = pending_checkpoint(db, id)?.ok_or("no hay un checkpoint pendiente")?;
+    let n = db::negotiation(db, id).map_err(|e| e.to_string())?;
+    let asked = cp.meta["price_pen"].as_f64();
+    if let (Some(p), Some(a)) = (price, asked) {
+        if p > a {
+            return Err("al editar solo puedes bajar el precio".into());
+        }
+    }
+    let price = price.or(asked);
+    if price.is_some_and(|p| p > n.case["walkaway_pen"].as_f64().unwrap_or(0.0)) {
+        return Err("ese precio supera el walk-away; subirlo es otra decisión".into());
+    }
+    let a = Approval { kind: cp.meta["kind"].as_str().unwrap_or("").into(), price_pen: price,
+        terms: cp.meta["terms"].as_str().unwrap_or("").into(), seller_offer: n.seller_offer };
+    let mut meta = a.meta();
+    meta["approved"] = json!(approved);
+    let text = if approved { "El dueño aprueba." } else { "El dueño rechaza." };
+    db::add_neg_message(db, id, now, "approval", text, &meta).map_err(|e| e.to_string())?;
+    Ok(a)
+}
+
+/// In copilot the 4.4 limits are advice: the human sends, so this only says what the limit would be.
+pub fn limit_hint(db: &Connection, id: i64, now: i64) -> Result<Option<String>, String> {
+    let sent: Vec<(i64, i64)> = db
+        .prepare("SELECT negotiation_id, ts FROM neg_messages WHERE role = 'sent'")
+        .and_then(|mut s| s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+        .map_err(|e: rusqlite::Error| e.to_string())?;
+    let thread = db::neg_messages(db, id).map_err(|e| e.to_string())?;
+    let unanswered = thread.iter().rev().take_while(|m| m.role != "seller").filter(|m| m.role == "sent").count();
+    Ok(limit(&sent, id, unanswered, now).err())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +753,92 @@ mod tests {
         assert!(limit(&one, 1, 3, t0 + 100 * 3600).is_err(), "third reminder");
         let twenty: Vec<(i64, i64)> = (0..20).map(|i| (100 + i, t0 + i * 60)).collect();
         assert!(limit(&twenty, 100, 0, t0 + 7200).unwrap_err().contains("20"));
+    }
+
+    /// A chat that answers each step with the next scripted tool call, repeating the last one.
+    pub(crate) fn scripted(calls: Vec<(&'static str, Value)>) -> impl Fn(&[Value], &[Value], bool) -> Result<Value, String> {
+        let step = std::sync::Mutex::new(0usize);
+        move |_, _, _| {
+            let mut i = step.lock().unwrap();
+            let (name, args) = &calls[(*i).min(calls.len() - 1)];
+            *i += 1;
+            Ok(json!({"content": "", "tool_calls": [{"id": format!("c{i}"), "type": "function",
+                "function": {"name": name, "arguments": args.to_string()}}]}))
+        }
+    }
+
+    fn negotiation(case: Value) -> db::Negotiation {
+        db::Negotiation { id: 1, run_id: None, status: "drafting".into(), case, our_offer: Some(850.0), seller_offer: Some(1000.0),
+            concessions: 0, signals: vec![], created: 0 }
+    }
+
+    #[test]
+    fn turn_rewrites_after_a_guard_block() {
+        let chat = scripted(vec![
+            ("update_offer", json!({"seller_offer_pen": 950, "seller_signals": ["presion", "inventada"], "note": "baja"})),
+            ("propose_message", json!({"text": "ya, trato hecho en 900", "intent": "counter", "price_pen": 900})),
+            ("propose_message", json!({"text": "¿me lo dejas en 900? recojo hoy", "intent": "counter", "price_pen": 900})),
+        ]);
+        let mut n = negotiation(case());
+        let t = turn(&mut n, &[], "seller_reply", 0, None, &chat, &|| false);
+        assert!(matches!(t.outcome, Outcome::Message { ref intent, .. } if intent == "counter"));
+        assert_eq!(t.blocks.iter().map(|(b, _)| b.guard).collect::<Vec<_>>(), ["G2"]);
+        assert_eq!((n.our_offer, n.seller_offer, n.concessions), (Some(900.0), Some(950.0), 1));
+        assert_eq!(n.signals, ["presion"], "signals outside the vocabulary are dropped");
+    }
+
+    #[test]
+    fn turn_still_blocked_on_last_step_sends_nothing() {
+        let chat = scripted(vec![("propose_message", json!({"text": "te yapeo el adelanto", "intent": "question"}))]);
+        let mut n = negotiation(case());
+        let t = turn(&mut n, &[], "seller_reply", 0, None, &chat, &|| false);
+        assert!(matches!(t.outcome, Outcome::Nothing(ref note) if note.contains("bloqueado")));
+        assert_eq!(t.blocks.len(), 2 * MAX_STEPS);
+    }
+
+    #[test]
+    fn copilot_resumes_from_the_db_and_needs_approval_to_close() {
+        let path = std::env::temp_dir().join(format!("obsession-neg-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let path = path.to_string_lossy().to_string();
+        let mut c = case();
+        c["trust"] = json!({"score": 70});
+        let id = {
+            let db = db::open(&path).unwrap();
+            let id = start(&db, None, &c, 100).unwrap();
+            let chat = scripted(vec![("propose_message", json!({"text": "hola, buenas, ¿todavía lo tienes?", "intent": "opening"}))]);
+            advance(&db, id, "start", 100, None, &chat, &|| false).unwrap();
+            id
+        };
+        // Next day, a new process: the state comes back from obsession.db.
+        let db = db::open(&path).unwrap();
+        let chat = scripted(vec![
+            ("update_offer", json!({"seller_offer_pen": 950, "note": "lo deja en 950"})),
+            ("propose_message", json!({"text": "dale, cerramos en 950", "intent": "conditional_accept", "price_pen": 950})),
+            ("request_human_checkpoint", json!({"kind": "accept_price", "price_pen": 950, "terms": "recojo hoy", "summary": "Aceptar 950"})),
+        ]);
+        reply(&db, id, "sí, te lo dejo en 950", 100 + 86_400, None, &chat, &|| false).unwrap();
+        let roles: Vec<String> = db::neg_messages(&db, id).unwrap().into_iter().map(|m| m.role).collect();
+        assert_eq!(roles, ["agent_draft", "sent", "seller", "guard_block", "checkpoint"]);
+        assert_eq!(db::negotiation(&db, id).unwrap().status, "awaiting_human");
+        assert!(decide(&db, id, true, Some(990.0), 0).is_err(), "editing can only lower the price");
+        decide(&db, id, true, None, 100 + 86_500).unwrap();
+        let chat = scripted(vec![("propose_message", json!({"text": "dale, cerramos en 950", "intent": "conditional_accept", "price_pen": 950}))]);
+        let t = advance(&db, id, "approval", 100 + 86_600, None, &chat, &|| false).unwrap();
+        assert!(t.blocks.is_empty(), "{:?}", t.blocks);
+        assert_eq!(db::negotiation(&db, id).unwrap().status, "deal_pending_payment");
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn low_trust_waits_for_a_checkpoint_and_bad_limits_are_refused() {
+        let db = db::open(":memory:").unwrap();
+        let mut c = case();
+        c["trust"] = json!({"score": 30, "flags": ["pocas_resenas"]});
+        let id = start(&db, None, &c, 0).unwrap();
+        assert_eq!(pending_checkpoint(&db, id).unwrap().unwrap().meta["kind"], "continue_low_trust");
+        c["target_pen"] = json!(1000.0);
+        assert!(start(&db, None, &c, 0).is_err(), "target above walk-away");
     }
 }
