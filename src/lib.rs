@@ -6,6 +6,8 @@ pub mod db;
 pub mod eval;
 pub mod llm;
 pub mod mcp;
+pub mod negotiate;
+pub mod negsim;
 pub mod packages;
 pub mod providers;
 pub mod stores;

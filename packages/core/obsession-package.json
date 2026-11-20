@@ -5,6 +5,7 @@
   "source": "builtin",
   "skills": [
     "skills/counterfeit-signals",
+    "skills/negotiation",
     "skills/price-normalization",
     "skills/report-findings",
     "skills/stop-criteria"
