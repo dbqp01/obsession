@@ -25,7 +25,6 @@ Obsession es un harness propio para tomar decisiones de compra. Su diferenciador
 ## Límites conocidos
 
 - Fuentes con JSON-LD (Ripley, Knasta) usan un solo parser genérico; sumar otra es una línea si su página de búsqueda trae `Product` con precio. Se evaluaron Crawl4AI, Firecrawl, Playwright MCP, browser-use y APIs como SerpApi (no cubre Perú): ninguno supera a este enfoque para tiendas peruanas, y se excluyeron las herramientas de evasión anti-bot.
-
 - Temu y AliExpress no se vuelven fiables con un modelo más inteligente: bloquean el acceso sin navegador. Las vías son tu sesión (Temu) o la API de afiliados (AliExpress).
 - AliExpress se recomprueba buscando de nuevo, no abriendo la página, porque la página necesita JavaScript. Su precio cambia entre búsquedas, y eso explica el único pick falso.
 - Negociación: el tono promedia 3.25/5 (el agente repite frases) y queda 1 falsa alarma causada por el vendedor simulado. Nada se probó con vendedores reales.
