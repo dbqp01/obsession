@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "origin": "https://simple.ripley.com.pe",
+  "allowed_origins": [],
+  "name": "ripley",
+  "tools": [
+    {
+      "id": "search_products",
+      "goal": "Buscar productos en Ripley Peru por texto y devolver titulo, precio en soles y enlace",
+      "effect": "read",
+      "input_fields": ["query"],
+      "extract": {
+        "mode": "list",
+        "root": "a.product-link",
+        "fields": {
+          "title": { "selector": ".product-item--name" },
+          "price": { "selector": ".product-price-price" },
+          "url": { "attr": "href", "absolute": true }
+        },
+        "require": ["title", "price", "url"],
+        "unique": "url"
+      }
+    }
+  ]
+}

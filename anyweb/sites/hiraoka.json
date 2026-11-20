@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "origin": "https://hiraoka.com.pe",
+  "allowed_origins": [],
+  "name": "hiraoka",
+  "tools": [
+    {
+      "id": "search_products",
+      "goal": "Buscar productos en Hiraoka por texto y devolver titulo, precio en soles y enlace",
+      "effect": "read",
+      "input_fields": ["query"],
+      "extract": {
+        "mode": "list",
+        "root": "ol.product-items > li.product-item",
+        "fields": {
+          "title": { "selector": ".product-item-name a.product-item-link" },
+          "price": { "selector": "[data-price-type=\"finalPrice\"]", "attr": "data-price-amount" },
+          "url": { "selector": ".product-item-name a.product-item-link", "attr": "href", "absolute": true }
+        },
+        "require": ["title", "price", "url"],
+        "unique": "url"
+      }
+    }
+  ]
+}
