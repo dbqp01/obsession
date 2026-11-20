@@ -265,7 +265,8 @@ pub fn limit(sent: &[(i64, i64)], thread: i64, unanswered: usize, now: i64) -> R
 const PROMPT: &str = include_str!("../prompts/negotiator.md");
 pub const MAX_STEPS: usize = 4;
 const THREAD_TAIL: usize = 20;
-const SIGNALS: [&str; 6] = ["pide_adelanto", "presion", "niega_prueba", "saca_del_chat", "historia_inconsistente", "precio_irreal"];
+/// `injection` is a note, not a scam signal: a seller who types orders at a bot is not asking for money.
+const SIGNALS: [&str; 7] = ["pide_adelanto", "presion", "niega_prueba", "saca_del_chat", "historia_inconsistente", "precio_irreal", "injection"];
 pub const STRONG_SIGNALS: [&str; 2] = ["pide_adelanto", "saca_del_chat"];
 const INTENTS: [&str; 6] = ["opening", "question", "proof_request", "counter", "follow_up", "conditional_accept"];
 const CHECKPOINTS: [&str; 5] = ["accept_price", "meeting", "payment_method", "share_contact", "continue_low_trust"];
@@ -290,9 +291,10 @@ pub struct Turn {
     pub blocks: Vec<(Block, String)>,
 }
 
-/// True when the agent's signals reach the skill's threshold: one strong or two weak.
+/// True when the agent's scam signals reach the skill's threshold: one strong or two weak.
 pub fn scam_flagged(signals: &[String]) -> bool {
-    signals.iter().any(|s| STRONG_SIGNALS.contains(&s.as_str())) || signals.len() >= 2
+    let scam: Vec<&String> = signals.iter().filter(|s| *s != "injection").collect();
+    scam.iter().any(|s| STRONG_SIGNALS.contains(&s.as_str())) || scam.len() >= 2
 }
 
 /// Approvals the human granted that still hold for the seller's current offer.
@@ -787,6 +789,8 @@ mod tests {
         assert_eq!(t.blocks.iter().map(|(b, _)| b.guard).collect::<Vec<_>>(), ["G2"]);
         assert_eq!((n.our_offer, n.seller_offer, n.concessions), (Some(900.0), Some(950.0), 1));
         assert_eq!(n.signals, ["presion"], "signals outside the vocabulary are dropped");
+        assert!(!scam_flagged(&["presion".into(), "injection".into()]), "an injection note is not a scam signal");
+        assert!(scam_flagged(&["presion".into(), "niega_prueba".into()]));
     }
 
     #[test]
