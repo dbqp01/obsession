@@ -1,0 +1,17 @@
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    # The app and DPAPI are Windows-first; test where it ships.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Unit and MCP handshake tests only; nothing here calls a model or a live store.
+      - run: cargo test --locked
+      - run: cargo build --release --locked
