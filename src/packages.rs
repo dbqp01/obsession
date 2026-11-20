@@ -123,11 +123,35 @@ fn nonempty(v: &Value) -> bool {
     v.as_str().is_some_and(|s| !s.trim().is_empty())
 }
 
+fn expand_package_dir(cfg: &mut Value, dir: &str) {
+    let fill = |v: &mut Value| {
+        if let Some(s) = v.as_str() {
+            *v = json!(s.replace("{package}", dir));
+        }
+    };
+    // get_mut, not indexing: a manifest entry that is not an object must fail validation, not panic.
+    if let Some(command) = cfg.get_mut("command") {
+        fill(command);
+    }
+    if let Some(args) = cfg.get_mut("args").and_then(Value::as_array_mut) {
+        args.iter_mut().for_each(fill);
+    }
+}
+
 /// Reads and validates the package in `dir`, loading its experts and skills.
 pub fn read(dir: &Path) -> Result<Package, String> {
     let path = dir.join(MANIFEST);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let m: Manifest = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut m: Manifest = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    // `{package}` in a command or arg is this package's folder, so a bundled MCP (e.g. one AnyWeb
+    // generated) can ship its own script and still run wherever the package was installed.
+    let here = dir.to_string_lossy().replace('\\', "/");
+    for cfg in m.mcp_servers.values_mut() {
+        expand_package_dir(cfg, &here);
+        if let Some(login) = cfg.get_mut("login") {
+            expand_package_dir(login, &here);
+        }
+    }
     if !safe_name(&m.name) {
         return Err(format!("nombre de paquete no válido: «{}» (usa a-z, 0-9, - y _)", m.name));
     }
@@ -309,6 +333,20 @@ mod tests {
         }
         std::fs::write(p.join(MANIFEST), m.to_string()).unwrap();
         p
+    }
+
+    #[test]
+    fn package_placeholder_points_at_its_own_folder() {
+        let mut cfg = json!({"command": "node", "args": ["{package}/mcp/server.mjs", "--flag"],
+            "login": {"command": "{package}/login.cmd", "args": []}});
+        expand_package_dir(&mut cfg, "C:/pkgs/hiraoka");
+        if let Some(login) = cfg.get_mut("login") {
+            expand_package_dir(login, "C:/pkgs/hiraoka");
+        }
+        assert_eq!(cfg["args"][0], "C:/pkgs/hiraoka/mcp/server.mjs");
+        assert_eq!(cfg["login"]["command"], "C:/pkgs/hiraoka/login.cmd");
+        let mut odd = json!("not an object");
+        expand_package_dir(&mut odd, "x"); // must not panic
     }
 
     #[test]

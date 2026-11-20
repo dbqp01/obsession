@@ -28,7 +28,7 @@ Un paquete agrupa expertos, skills y servidores MCP. Es una carpeta con un `obse
 | `version`, `description`, `source` | sí | `source` dice de dónde viene: `builtin`, `anyweb`, … |
 | `experts` | no | Rutas a los `.md` de expertos, relativas al paquete. |
 | `skills` | no | Rutas a carpetas con `SKILL.md`. |
-| `mcp_servers` | no | Igual que el antiguo `mcp.json`: `command` (no vacío; `self` es el propio binario), `args` y `login` opcional. |
+| `mcp_servers` | no | Igual que el antiguo `mcp.json`: `command` (no vacío; `self` es el propio binario), `args` y `login` opcional. `{package}` en `command` o `args` se reemplaza por la carpeta del paquete instalado, para que un MCP empaquetado (por ejemplo, uno generado por AnyWeb) lleve su propio script. |
 | `requires` | no | `binary`: un programa en el PATH. `check` puede ser `>=N` (versión mayor de `<name> --version`) o la ruta del archivo cuando no está en el PATH. `session`: el `login` de un MCP del paquete. |
 | `tested_with` | no | Modelos con los que se evaluó. |
 
@@ -48,3 +48,11 @@ obsession packages              # instalados, con lo que les falta
 obsession install <carpeta>     # valida, copia y dice qué falta (p. ej. obsession login temu)
 obsession uninstall <paquete>   # solo los instalados por ti
 ```
+
+## MCPs generados por AnyWeb
+
+Obsession lee tres formas de resultado de una tool de búsqueda:
+
+1. Un arreglo JSON de listings: `[{"store", "title", "price_pen", "url", "seller", "rating", "sold"}]` (los MCPs propios de Obsession).
+2. El formato del motor genérico de AnyWeb: `{"data": {"items": [...]}}`, donde todos los campos son texto. Para que entren sin configuración extra, la declaración del sitio en AnyWeb debe nombrar sus campos `title`, `price`, `url` y, opcionalmente, `seller`, `rating` y `sold`. Los items sin título, sin precio o sin URL `https://` se descartan.
+3. El texto numerado de los conectores de AnyWeb (`1. título / Precio: S/ 24.49 / Enlace: url`), como el de Temu.

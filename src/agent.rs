@@ -255,10 +255,10 @@ pub fn run_expert(
                             blocked |= e.contains(crate::stores::BLOCKED);
                             format!("error: {e}")
                         }
-                        Ok(text) => match serde_json::from_str::<Vec<Listing>>(&text)
-                            .ok()
-                            .or_else(|| text_listings(&text, name.split_once("__").map_or(name, |(srv, _)| srv)))
-                        {
+                        Ok(text) => match serde_json::from_str::<Vec<Listing>>(&text).ok().or_else(|| {
+                            let srv = name.split_once("__").map_or(name, |(srv, _)| srv);
+                            anyweb_items(&text, srv).or_else(|| text_listings(&text, srv))
+                        }) {
                             Some(listings) => {
                                 let ids = store.add(listings);
                                 emit(json!({"kind": "search", "expert": expert.name, "query": args["query"], "results": ids.len()}));
@@ -275,6 +275,30 @@ pub fn run_expert(
         }
     }
     failed("se agotaron los pasos sin submit".into())
+}
+
+/// Reads a tool packaged by AnyWeb's generic engine: `{"data":{"items":[...]},"evidence":{...}}`
+/// with every field a string. Declarations must name their fields `title`, `price`, `url` and,
+/// optionally, `seller`, `rating`, `sold`; items missing a title, a price or a URL are dropped.
+fn anyweb_items(text: &str, store: &str) -> Option<Vec<Listing>> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    let field = |x: &Value, k: &str| x[k].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let out: Vec<Listing> = v["data"]["items"]
+        .as_array()?
+        .iter()
+        .filter_map(|x| {
+            Some(Listing {
+                store: store.into(),
+                title: field(x, "title")?,
+                price_pen: Some(crate::stores::parse_price(&field(x, "price")?)).filter(|p| *p > 0.0)?,
+                url: field(x, "url").filter(|u| u.starts_with("https://"))?,
+                seller: field(x, "seller"),
+                rating: field(x, "rating").map(|r| crate::stores::parse_price(&r)).filter(|r| *r > 0.0),
+                sold: field(x, "sold"),
+            })
+        })
+        .collect();
+    (!out.is_empty()).then_some(out)
 }
 
 /// Reads AnyWeb's text format: numbered "N. title" blocks with "Precio:" and "Enlace:" lines.
@@ -306,6 +330,18 @@ fn text_listings(text: &str, store: &str) -> Option<Vec<Listing>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_anyweb_generic_items() {
+        let text = r#"{"data":{"items":[
+            {"title":"KZ EDX Pro","price":"S/ 49.90","url":"https://hiraoka.com.pe/kz-edx-pro","rating":"4.5"},
+            {"title":"Sin precio","price":"","url":"https://hiraoka.com.pe/x"},
+            {"title":"Enlace raro","price":"S/ 10","url":"javascript:alert(1)"}]},"evidence":{}}"#;
+        let l = anyweb_items(text, "hiraoka").unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!((l[0].price_pen, l[0].rating, l[0].store.as_str()), (49.9, Some(4.5), "hiraoka"));
+        assert!(anyweb_items(r#"{"error":"UPSTREAM_CHANGED"}"#, "x").is_none());
+    }
 
     #[test]
     fn reads_anyweb_text_listings() {
