@@ -11,7 +11,7 @@ el formato que lee Obsession (ver `docs/packages.md`, "MCPs generados por AnyWeb
 
 ## Hiraoka: lo que debes ejecutar
 
-Desde el checkout de AnyWeb (`C:\Users\akimi\Documents\ChatGPT\pluggin web2api`), en PowerShell.
+Desde el checkout de AnyWeb (`C:\Users\akimi\Desktop\anyweb`), en PowerShell.
 Hiraoka responde con ~21 KB de cabeceras HTTP y Node corta en 16 KB (`UND_ERR_HEADERS_OVERFLOW`,
 que AnyWeb reporta como `UPSTREAM_UNAVAILABLE`). Por eso todos los comandos llevan el límite ampliado:
 

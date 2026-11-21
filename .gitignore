@@ -5,3 +5,4 @@ app/gen/
 run-*.csv
 runs/
 eval/results/
+packages/*/mcp/node_modules/

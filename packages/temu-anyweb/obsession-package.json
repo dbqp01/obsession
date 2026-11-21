@@ -1,19 +1,19 @@
 {
   "name": "temu-anyweb",
   "version": "0.1.0",
-  "description": "Temu Perú con la sesión del usuario, a través del MCP de AnyWeb.",
+  "description": "Temu Perú con la sesión del usuario, con su propio MCP (en mcp/).",
   "source": "anyweb",
   "experts": ["experts/temu.md"],
   "mcp_servers": {
     "temu": {
       "command": "node",
-      "args": ["C:/Users/akimi/Documents/ChatGPT/pluggin web2api/src/connectors/temu/entry.mjs"],
+      "args": ["{package}/mcp/entry.mjs"],
       "login": {
         "label": "Temu",
         "site": "https://www.temu.com",
         "profile": "temu-chrome",
         "command": "node",
-        "args": ["C:/Users/akimi/Documents/ChatGPT/pluggin web2api/src/cli.mjs", "temu", "login"]
+        "args": ["{package}/mcp/login.mjs"]
       }
     }
   },
