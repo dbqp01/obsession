@@ -278,6 +278,107 @@ pub fn install(src: &Path, builtin: &Path, user: &Path) -> Result<(String, Vec<S
     Ok((name, todo.unwrap_or_default()))
 }
 
+/// Marketplace packages are npm packages under this prefix. Only this scope is trusted for now:
+/// a package runs its MCP on the person's machine, and only the owner publishes there.
+pub const NPM_PREFIX: &str = "@akimibks/obsession-";
+
+/// `@akimibks/obsession-<name>` with an optional exact `@x.y.z`. Anything else is refused before npm runs.
+pub fn npm_spec_ok(spec: &str) -> bool {
+    let Some(rest) = spec.strip_prefix(NPM_PREFIX) else { return false };
+    let (name, version) = rest.split_once('@').unwrap_or((rest, ""));
+    let name_ok = !name.is_empty() && name.len() <= 50 && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    let version_ok = version.is_empty() || {
+        let parts: Vec<&str> = version.split('.').collect();
+        parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    };
+    name_ok && version_ok
+}
+
+/// Downloads a marketplace package with `npm pack`, which checks the registry's sha512 integrity,
+/// unpacks it and installs it like a local folder. The temporary copy is always removed.
+pub fn install_npm(spec: &str, builtin: &Path, user: &Path) -> Result<(String, Vec<String>), String> {
+    if !npm_spec_ok(spec) {
+        return Err(format!("solo se instalan paquetes {NPM_PREFIX}<nombre>[@x.y.z]; «{spec}» no lo es"));
+    }
+    let work = std::env::temp_dir().join(format!("obsession-npm-{}-{}", std::process::id(), stamp()));
+    std::fs::create_dir_all(&work).map_err(|e| format!("no se pudo crear {}: {e}", work.display()))?;
+    let result = npm_pack(spec, &work).and_then(|tgz| unpack(&tgz, &work)).and_then(|dir| install(&dir, builtin, user));
+    std::fs::remove_dir_all(&work).ok();
+    result
+}
+
+fn stamp() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+}
+
+fn npm_pack(spec: &str, dest: &Path) -> Result<PathBuf, String> {
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let out = std::process::Command::new(npm)
+        .args(["pack", spec, "--json", "--pack-destination"])
+        .arg(dest)
+        .output()
+        .map_err(|e| format!("no se pudo ejecutar npm ({e}); instala Node.js 24"))?;
+    // With --json npm reports failures on stdout as {"error": {"code", "summary"}}.
+    let packed: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+    if !out.status.success() || packed.get("error").is_some() {
+        return Err(match packed["error"]["code"].as_str() {
+            Some("E404") => format!("{spec} no existe en npm"),
+            Some(code) => format!("no se pudo descargar {spec}: npm {code}"),
+            None => format!("no se pudo descargar {spec}: npm falló"),
+        });
+    }
+    let file = packed[0]["filename"].as_str().ok_or("npm no dijo qué archivo descargó")?;
+    // npm names the tarball itself; it must stay a plain file name inside `dest`.
+    if file.contains(['/', '\\']) || file.contains("..") {
+        return Err(format!("nombre de archivo inesperado de npm: {file}"));
+    }
+    Ok(dest.join(file))
+}
+
+/// Unpacks an npm tarball and returns its `package/` folder. On Windows the system bsdtar is used by
+/// full path; it refuses `..` and absolute entries, and `read` validates the manifest afterwards.
+fn unpack(tgz: &Path, dest: &Path) -> Result<PathBuf, String> {
+    let tar = match std::env::var_os("SystemRoot") {
+        Some(root) if cfg!(windows) => PathBuf::from(root).join("System32").join("tar.exe"),
+        _ => PathBuf::from("tar"),
+    };
+    let out_dir = dest.join("unpacked");
+    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let status = std::process::Command::new(&tar).arg("-xzf").arg(tgz).arg("-C").arg(&out_dir).status()
+        .map_err(|e| format!("no se pudo ejecutar tar: {e}"))?;
+    if !status.success() {
+        return Err("el paquete descargado no se pudo descomprimir".into());
+    }
+    let dir = out_dir.join("package");
+    if !dir.join(MANIFEST).is_file() {
+        return Err(format!("el paquete npm no trae {MANIFEST}"));
+    }
+    Ok(dir)
+}
+
+/// Searches the npm registry for marketplace packages. Results outside the trusted prefix are dropped.
+pub fn search(text: &str) -> Result<Vec<(String, String, String)>, String> {
+    let query = format!("keywords:obsession-package {text}");
+    let url = reqwest::Url::parse_with_params("https://registry.npmjs.org/-/v1/search", [("text", query.trim()), ("size", "50")])
+        .map_err(|e| e.to_string())?;
+    let body: Value = reqwest::blocking::Client::new()
+        .get(url)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.json())
+        .map_err(|e| format!("no se pudo buscar en npm: {e}"))?;
+    Ok(body["objects"].as_array().into_iter().flatten().filter_map(|o| {
+        let p = &o["package"];
+        let name = p["name"].as_str()?;
+        npm_spec_ok(name).then(|| (name.to_string(), s(&p["version"]), s(&p["description"])))
+    }).collect())
+}
+
+fn s(v: &Value) -> String {
+    v.as_str().unwrap_or("").to_string()
+}
+
 /// Removes a user-installed package. Builtin packages ship with Obsession and are refused.
 pub fn uninstall(name: &str, builtin: &Path, user: &Path) -> Result<(), String> {
     if !safe_name(name) {
@@ -466,6 +567,43 @@ mod tests {
         assert!(!user.join("nuevo").exists());
         assert!(uninstall("nuevo", &builtin, &user).is_err());
         for d in [src, builtin, user] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn npm_specs_stay_in_the_trusted_scope() {
+        for ok in ["@akimibks/obsession-hiraoka", "@akimibks/obsession-temu-pe@1.2.30"] {
+            assert!(npm_spec_ok(ok), "{ok}");
+        }
+        for bad in ["hiraoka", "@otro/obsession-x", "@akimibks/anyweb", "@akimibks/obsession-", "@akimibks/obsession-X",
+            "@akimibks/obsession-x@latest", "@akimibks/obsession-x@1.2", "@akimibks/obsession-x@^1.0.0", "@akimibks/obsession-x --global",
+            "@akimibks/obsession-../x", "@akimibks/obsession-x@1.0.0@2.0.0"] {
+            assert!(!npm_spec_ok(bad), "{bad}");
+        }
+        let (builtin, user) = (tmp("npm-builtin"), tmp("npm-user"));
+        assert!(install_npm("@otro/obsession-x", &builtin, &user).unwrap_err().contains("solo se instalan"));
+    }
+
+    #[test]
+    fn unpacks_an_npm_tarball_and_installs_it() {
+        let (work, builtin, user) = (tmp("tgz"), tmp("tgz-builtin"), tmp("tgz-user"));
+        let staged = work.join("stage");
+        let p = package(&staged, "package", json!({}));
+        std::fs::write(p.join("x.mjs"), "// bundle").unwrap();
+        // npm tarballs keep everything under `package/`; build one the same way.
+        let tgz = work.join("pkg.tgz");
+        let tar = match std::env::var_os("SystemRoot") {
+            Some(root) if cfg!(windows) => PathBuf::from(root).join("System32").join("tar.exe"),
+            _ => PathBuf::from("tar"),
+        };
+        assert!(std::process::Command::new(tar).arg("-czf").arg(&tgz).arg("-C").arg(&staged).arg("package").status().unwrap().success());
+        let dir = unpack(&tgz, &work).unwrap();
+        let (name, _) = install(&dir, &builtin, &user).unwrap();
+        assert_eq!(name, "package");
+        assert!(user.join("package/x.mjs").is_file());
+        assert!(unpack(&work.join("missing.tgz"), &work).is_err());
+        for d in [work, builtin, user] {
             std::fs::remove_dir_all(d).ok();
         }
     }

@@ -45,9 +45,22 @@ Se cargan los dos. Si un paquete repite el nombre de un paquete, experto, skill 
 
 ```
 obsession packages              # instalados, con lo que les falta
+obsession search [texto]        # busca en la marketplace (npm)
 obsession install <carpeta>     # valida, copia y dice qué falta (p. ej. obsession login temu)
+obsession install @akimibks/obsession-<nombre>[@x.y.z]   # desde la marketplace
 obsession uninstall <paquete>   # solo los instalados por ti
 ```
+
+## Marketplace
+
+Los paquetes de la marketplace son paquetes npm llamados `@akimibks/obsession-<nombre>` con la
+keyword `obsession-package`. Por dentro son la misma carpeta de arriba. Si el experto usa un MCP
+generado por AnyWeb, el bundle va dentro y se referencia con `{package}`. Por ahora solo se instala
+ese scope: un paquete ejecuta su MCP en tu máquina, y solo el dueño publica ahí.
+
+`install` usa `npm pack`, que comprueba la integridad sha512 del registry. Luego descomprime el
+tarball con el `tar` del sistema y lo instala como una carpeta local, con las mismas validaciones.
+Hace falta Node.js 24.
 
 ## MCPs generados por AnyWeb
 

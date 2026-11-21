@@ -36,8 +36,22 @@ fn main() {
             }
             Ok(())
         }
+        Some("search") => packages::search(&args[1..].join(" ")).map_err(Into::into).map(|found| {
+            if found.is_empty() {
+                println!("No hay paquetes que coincidan.");
+            }
+            for (name, version, description) in found {
+                println!("{name:<36} {version:<8} {description}");
+            }
+        }),
         Some("install") => user_dir().and_then(|user| {
-            let (name, todo) = packages::install(Path::new(arg1(&args)), &root.join("packages"), &user)?;
+            let target = arg1(&args);
+            // `@scope/name` comes from the marketplace on npm; anything else is a local folder.
+            let (name, todo) = if target.starts_with('@') {
+                packages::install_npm(target, &root.join("packages"), &user)?
+            } else {
+                packages::install(Path::new(target), &root.join("packages"), &user)?
+            };
             println!("Instalado {name} en {}", user.join(&name).display());
             for t in todo {
                 println!("  ! {t}");
@@ -98,7 +112,9 @@ const USAGE: &str = "uso:
   obsession \"audífonos over-ear hasta 350 soles, Cusco\"
   obsession eval [caso]
   obsession experts | skills | packages | connections
-  obsession install <carpeta> | uninstall <paquete>
+  obsession search [texto]                          (marketplace en npm)
+  obsession install <carpeta> | install @akimibks/obsession-<nombre>[@x.y.z]
+  obsession uninstall <paquete>
   obsession login <plataforma> | logout <plataforma>
   obsession provider add <nombre> <base_url> | provider list
   obsession key set <proveedor>     (lee la clave de stdin, nunca de los argumentos)
